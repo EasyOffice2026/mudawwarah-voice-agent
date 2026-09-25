@@ -1,0 +1,22 @@
+{
+  "name": "mudawwarah-voice-agent",
+  "version": "1.0.0",
+  "description": "WhatsApp voice sales agent for Mudawwarah restaurant — transcribes voice notes, sells from the live menu and places orders through the Mdawra API.",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test test/*.test.js",
+    "lint": "for f in src/*.js test/*.js; do node --check \"$f\" || exit 1; done"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1"
+  },
+  "license": "ISC",
+  "private": true
+}
