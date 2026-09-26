@@ -56,6 +56,16 @@ export const completeJson = async ({ system, messages, schema, schemaName }) => 
   return JSON.parse(data.choices?.[0]?.message?.content || '{}');
 };
 
+const ARABIC_VOICE = [
+  'Accent: native Kuwaiti Arabic speaker from Kuwait City. Pronounce the text exactly as a Kuwaiti would in everyday speech, not Modern Standard Arabic and not Egyptian or Levantine.',
+  'Kuwaiti phonetics: pronounce ج as a soft "y" sound where Kuwaitis do (e.g. "ديرة", "يالله"), ق as "g" in colloquial words (e.g. "قال" -> "gaal"), ك as "ch" where natural (e.g. "شخبارك" -> "shakhbaarich" for a woman). Relaxed Gulf vowels, drop case endings entirely.',
+  'Persona: a warm, friendly Kuwaiti restaurant host, hospitable and unhurried, with a light smile in the voice. Natural pauses between sentences.',
+  'Say prices and numbers clearly in Kuwaiti colloquial form (e.g. "دينار ونص", "ثلاث دنانير", "خمسمية فلس").',
+].join(' ');
+
+const ENGLISH_VOICE =
+  'Speak as a warm, upbeat Kuwaiti restaurant host speaking clear English with a light Gulf Arabic accent. Say prices clearly.';
+
 /** Text-to-speech as OGG/Opus — the container WhatsApp plays as a voice note. */
 export const synthesize = async (text, lang) => {
   const response = await fetch(`${config.openai.baseUrl}/audio/speech`, {
@@ -66,10 +76,7 @@ export const synthesize = async (text, lang) => {
       voice: config.openai.ttsVoice,
       input: text,
       response_format: 'opus',
-      instructions:
-        lang === 'ar'
-          ? 'Speak warm, natural Gulf (Kuwaiti) Arabic like a friendly restaurant host. Say prices clearly.'
-          : 'Speak as a warm, upbeat restaurant host. Say prices clearly.',
+      instructions: lang === 'ar' ? ARABIC_VOICE : ENGLISH_VOICE,
     }),
   });
   if (!response.ok) await fail(response, 'Speech synthesis');
