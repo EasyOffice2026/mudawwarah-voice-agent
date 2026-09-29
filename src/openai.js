@@ -26,12 +26,17 @@ const languageCode = (value) => {
   return v.slice(0, 2);
 };
 
-/** Speech-to-text. Returns `{ text, language }`; language is an ISO-639-1 code when known. */
+// Arabic first: with an English-only prompt, Whisper tends to answer Kuwaiti voice notes in English.
+const TRANSCRIBE_PROMPT = 'طلب أكل من مطعم مدورة في الكويت، باللهجة الكويتية أو بالإنجليزي. أصناف المنيو، الكمية، عنوان التوصيل. Restaurant order in Kuwaiti Arabic or English; write it in the language spoken, never translate.';
+
+/** Speech-to-text. Returns `{ text, language }`; language is an ISO-639-1 code when the model reports one. */
 export const transcribe = async (buffer, mimeType) => {
+  const model = config.openai.transcribeModel;
   const form = new FormData();
-  form.append('model', config.openai.transcribeModel);
-  form.append('response_format', 'verbose_json');
-  form.append('prompt', 'Restaurant food order in Kuwaiti Arabic or English. Menu items, quantities, delivery address.');
+  form.append('model', model);
+  // Only whisper-1 supports verbose_json (which adds the detected language); the gpt-4o transcribe models take json.
+  form.append('response_format', model.startsWith('whisper') ? 'verbose_json' : 'json');
+  form.append('prompt', TRANSCRIBE_PROMPT);
   form.append('file', new Blob([buffer], { type: mimeType }), `voice.${extensionFor(mimeType)}`);
   const response = await fetch(`${config.openai.baseUrl}/audio/transcriptions`, { method: 'POST', headers: headers(), body: form });
   if (!response.ok) await fail(response, 'Transcription');

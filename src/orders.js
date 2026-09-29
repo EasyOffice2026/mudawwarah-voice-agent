@@ -85,7 +85,7 @@ export const notifyKitchen = async (text) => {
   }
 };
 
-export const orderSummaryForKitchen = (order, customer) => {
+export const orderSummaryForKitchen = (order, customer, location = null) => {
   const lines = (order.items || []).map((i) => `${i.quantity} × ${i.nameEn}${i.customizations?.length ? ` (${i.customizations.map((c) => c.nameEn).join(', ')})` : ''}`);
   const where = order.orderType === 'PICKUP' ? 'PICKUP' : `Delivery: ${order.address || [customer.area, customer.block, customer.street, customer.building].filter(Boolean).join(', ')}`;
   return [
@@ -93,6 +93,7 @@ export const orderSummaryForKitchen = (order, customer) => {
     ...lines,
     `Total: KWD ${Number(order.total).toFixed(3)} — ${order.paymentMethod}`,
     where,
+    location && order.orderType !== 'PICKUP' ? `Map: https://maps.google.com/?q=${location.lat},${location.lng}` : null,
     `${order.customerName} — ${order.customerPhone}`,
     order.notes ? `Notes: ${order.notes}` : null,
   ]

@@ -9,7 +9,8 @@ process.env.KITCHEN_WHATSAPP_NUMBER = '96599990000';
 process.env.ADMIN_TOKEN = 'admin-secret';
 process.env.VOICE_REPLIES = 'true';
 process.env.ORDER_POLL_SECONDS = '0';
-delete process.env.DATA_DIR;
+// Empty rather than deleted: dotenv only fills unset variables, so deleting it let .env point the tests at the real data folder.
+process.env.DATA_DIR = '';
 
 export const menu = [
   {
@@ -23,6 +24,7 @@ export const menu = [
         nameAr: 'شاورما دجاج',
         price: '1.500',
         isFeatured: true,
+        image: { url: 'https://cdn.test/shawarma.png' },
         options: [
           { id: 'opt-garlic', nameEn: 'Garlic', nameAr: 'ثوم', groupEn: 'Sauce', groupAr: 'الصوص', isRequired: true, extraPrice: '0' },
           { id: 'opt-tahini', nameEn: 'Tahini', nameAr: 'طحينة', groupEn: 'Sauce', groupAr: 'الصوص', isRequired: true, extraPrice: '0' },
@@ -75,5 +77,12 @@ export const mockFetch = (routes) => {
 };
 
 export const bodyOf = (call) => JSON.parse(call.init.body);
+/** Every outbound message with its readable text: body, button prompt or photo caption. */
+export const sentMessages = (calls) =>
+  calls
+    .filter((c) => c.url.includes('/12345/messages'))
+    .map(bodyOf)
+    .filter((b) => b.type !== undefined)
+    .map((b) => ({ to: b.to, type: b.type, text: b.text?.body ?? b.interactive?.body?.text ?? b.image?.caption ?? '', body: b }));
 export const sentTexts = (calls) =>
   calls.filter((c) => c.url.includes('/12345/messages')).map((c) => bodyOf(c)).filter((b) => b.type === 'text').map((b) => ({ to: b.to, text: b.text.body }));

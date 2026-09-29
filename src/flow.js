@@ -8,6 +8,7 @@ import * as payment from './payment.js';
 import { t } from './copy.js';
 import {
   RESPONSE_SCHEMA,
+  money,
   buildCatalogue,
   priceCart,
   describeCart,
@@ -28,17 +29,61 @@ const composeAddress = (c) => [c.area && `Area ${c.area}`, c.block && `Block ${c
 /** Mdawra's payment enum has no ONLINE value; a payment link in Kuwait is KNET. */
 const mdawraPaymentMethod = (method) => (method === 'ONLINE' ? 'KNET' : method || 'CASH');
 
+/** Why the order cannot be placed yet, as a message for the customer, or null when it can. */
+const orderBlocker = (session, settings, catalogue) => {
+  const copy = t(session.lang);
+  if (settings.isOpen === 'false') return copy.closed(settings.workingHours);
+  const { missing } = missingForOrder(session, settings);
+  if (missing.length) return missingFieldsNote(session.lang, missing);
+  const { subtotal } = priceCart(session.cart, catalogue);
+  if (subtotal < Number(settings.minimumOrder || 0)) return copy.minimumOrder(settings.minimumOrder);
+  return null;
+};
+
+/**
+ * Shows the customer exactly what will reach the kitchen — built from the real
+ * cart, not the model's memory — and waits for them to confirm it.
+ */
+export const reviewOrder = (session, settings, catalogue) => {
+  const blocker = orderBlocker(session, settings, catalogue);
+  if (blocker) return blocker;
+  const { orderType } = missingForOrder(session, settings);
+  session.awaitingConfirmation = true;
+  return t(session.lang).reviewOrder({
+    cart: describeCart(session.cart, catalogue, session.lang),
+    customer: session.customer,
+    orderType,
+    deliveryFee: Number(settings.deliveryFee || 0),
+    paymentMethod: session.paymentMethod,
+    hasPin: Boolean(session.location),
+  });
+};
+
+const confirmButtons = (lang) => [
+  { id: 'order:confirm', title: t(lang).confirmButton },
+  { id: 'order:change', title: t(lang).changeButton },
+];
+
+/** Everything the customer confirmed; any change after the review needs a new review. */
+const orderSnapshot = (session) => JSON.stringify([session.cart, session.customer, session.orderType, session.paymentMethod, session.location]);
+
+/** Photo messages for the catalogue numbers the agent picked (max 3), captioned with name and price. */
+const photosFor = (numbers, catalogue, lang) =>
+  [...new Set(numbers || [])]
+    .map((no) => catalogue.items.find((c) => c.no === no))
+    .filter((entry) => entry?.item.image?.url)
+    .slice(0, 3)
+    .map(({ item }) => ({ url: item.image.url, caption: `${lang === 'ar' && item.nameAr ? item.nameAr : item.nameEn} — ${money(item.price)}` }));
+
 /**
  * Places the order through the Mdawra API and, for online payment, sends the
  * link. Returns the text to show the customer.
  */
 export const placeOrder = async (session, settings, catalogue) => {
   const copy = t(session.lang);
-  if (settings.isOpen === 'false') return copy.closed(settings.workingHours);
-  const { missing, orderType } = missingForOrder(session, settings);
-  if (missing.length) return missingFieldsNote(session.lang, missing);
-  const { subtotal } = priceCart(session.cart, catalogue);
-  if (subtotal < Number(settings.minimumOrder || 0)) return copy.minimumOrder(settings.minimumOrder);
+  const blocker = orderBlocker(session, settings, catalogue);
+  if (blocker) return blocker;
+  const { orderType } = missingForOrder(session, settings);
 
   const c = session.customer;
   let order;
@@ -53,6 +98,8 @@ export const placeOrder = async (session, settings, catalogue) => {
       street: c.street,
       building: c.building,
       notes: c.notes || undefined,
+      deliveryLat: orderType === 'DELIVERY' && session.location ? session.location.lat : undefined,
+      deliveryLng: orderType === 'DELIVERY' && session.location ? session.location.lng : undefined,
       paymentMethod: mdawraPaymentMethod(session.paymentMethod),
       channel: 'WHATSAPP',
       items: session.cart.map((line) => ({ menuItemId: line.menuItemId, quantity: line.quantity, optionIds: line.optionIds })),
@@ -82,7 +129,7 @@ export const placeOrder = async (session, settings, catalogue) => {
     reply = copy.orderPlaced(order.orderNumber, order.total);
   }
   orders.track({ order, phone: session.phone, lang: session.lang, paymentMethod, paymentReference });
-  await orders.notifyKitchen(orders.orderSummaryForKitchen(order, c) + (paymentMethod === 'ONLINE' ? '\n(awaiting online payment)' : ''));
+  await orders.notifyKitchen(orders.orderSummaryForKitchen(order, c, session.location) + (paymentMethod === 'ONLINE' ? '\n(awaiting online payment)' : ''));
   sessions.resetOrder(session);
   return reply;
 };
@@ -121,11 +168,14 @@ export const runAgent = async (session, text) => {
   }
 
   if (result.lang === 'ar' || result.lang === 'en') session.lang = result.lang;
+  const before = orderSnapshot(session);
   const { cart, missingOptions } = applyCartChanges(session.cart, result, catalogue);
   session.cart = cart;
   applyCustomerDetails(session, result, { onlinePayment });
+  if (orderSnapshot(session) !== before) session.awaitingConfirmation = false;
 
   const parts = [result.reply];
+  let buttons = null;
   if (missingOptions.length) parts.push(missingOptionsNote(session.lang, missingOptions));
   switch (result.action) {
     case 'show_cart':
@@ -133,6 +183,7 @@ export const runAgent = async (session, text) => {
       break;
     case 'clear_cart':
       session.cart = [];
+      session.awaitingConfirmation = false;
       parts.push(t(session.lang).cartCleared);
       break;
     case 'order_status':
@@ -143,14 +194,36 @@ export const runAgent = async (session, text) => {
       parts.push(t(session.lang).humanHandoff);
       break;
     case 'place_order':
-      if (!missingOptions.length) parts.push(await placeOrder(session, settings, catalogue));
+      // First request shows the real order for a yes; only the confirmation afterwards places it.
+      if (missingOptions.length) break;
+      if (session.awaitingConfirmation) {
+        parts.push(await placeOrder(session, settings, catalogue));
+      } else {
+        parts.push(reviewOrder(session, settings, catalogue));
+        if (session.awaitingConfirmation) buttons = confirmButtons(session.lang);
+      }
       break;
     default:
       break;
   }
-  const reply = parts.filter(Boolean).join('\n\n');
   sessions.remember(session, 'assistant', result.reply);
   sessions.save(session);
+  return { text: parts.filter(Boolean).join('\n\n'), buttons, photos: photosFor(result.photos, catalogue, session.lang) };
+};
+
+/** Confirm / Change buttons under the order review; confirming places the order without asking the model. */
+const handleOrderButton = async (session, replyId, title) => {
+  if (replyId === 'order:change') {
+    session.awaitingConfirmation = false;
+    sessions.remember(session, 'user', title);
+    sessions.remember(session, 'assistant', t(session.lang).whatToChange);
+    return t(session.lang).whatToChange;
+  }
+  if (replyId !== 'order:confirm' || !session.awaitingConfirmation) return null;
+  const [categories, settings] = await Promise.all([mdawra.getMenu(), mdawra.getSettings()]);
+  const reply = await placeOrder(session, settings, buildCatalogue(categories));
+  sessions.remember(session, 'user', title);
+  sessions.remember(session, 'assistant', reply);
   return reply;
 };
 
@@ -195,11 +268,20 @@ export const handleAfterSales = async (session, { text, replyId }) => {
 };
 
 /** Entry point for one inbound WhatsApp message. */
-export const handleInbound = async ({ phone, waName, text, replyId, audioId, mimeType }) => {
+export const handleInbound = async ({ phone, waName, text, replyId, audioId, mimeType, location, unsupported }) => {
   const session = sessions.get(phone, waName);
   const copy = () => t(session.lang);
   let utterance = text || '';
   let fromVoice = false;
+
+  if (unsupported) return finish(session, copy().unsupportedMessage, false);
+  if (location && Number.isFinite(location.lat) && Number.isFinite(location.lng)) {
+    session.location = { lat: location.lat, lng: location.lng };
+    utterance = `[Shared a map location${location.label ? `: ${location.label}` : ''}]`;
+  }
+
+  const orderButton = await handleOrderButton(session, replyId, text);
+  if (orderButton) return finish(session, orderButton, false);
 
   if (audioId) {
     if (!isOpenAiConfigured()) return finish(session, copy().aiUnavailable, false);
@@ -208,7 +290,8 @@ export const handleInbound = async ({ phone, waName, text, replyId, audioId, mim
       const { text: transcript, language } = await openai.transcribe(media.buffer, mimeType || media.mimeType);
       if (!transcript) return finish(session, copy().unclearVoice, false);
       utterance = transcript;
-      if (language) session.lang = language;
+      // The script of what was said beats the model's language label, which can be wrong on short, noisy notes.
+      session.lang = detectLang(transcript, language || session.lang);
       fromVoice = true;
     } catch (error) {
       console.error('[flow] transcription failed', error.message);
@@ -226,12 +309,26 @@ export const handleInbound = async ({ phone, waName, text, replyId, audioId, mim
   return finish(session, reply, fromVoice);
 };
 
+/** Sends a reply: photos first, then the text (with buttons when given), then an optional voice note. */
 const finish = async (session, reply, voice) => {
+  const { text, buttons, photos } = typeof reply === 'string' ? { text: reply } : reply;
   sessions.save(session);
-  await wa.sendText(session.phone, reply);
+  for (const photo of photos || []) {
+    try {
+      await wa.sendImage(session.phone, photo.url, photo.caption);
+    } catch (error) {
+      console.error('[flow] photo failed', photo.url, error.message);
+    }
+  }
+  if (buttons?.length && text.length <= 1024) {
+    await wa.sendButtons(session.phone, text, buttons);
+  } else {
+    await wa.sendText(session.phone, text);
+    if (buttons?.length) await wa.sendButtons(session.phone, t(session.lang).confirmPrompt, buttons);
+  }
   if (voice && config.openai.voiceReplies) {
     try {
-      const spoken = reply.split('\n\n')[0];
+      const spoken = text.split('\n\n')[0];
       const audio = await openai.synthesize(spoken, session.lang);
       const mediaId = await wa.uploadMedia(audio.buffer, audio.mimeType);
       await wa.sendAudio(session.phone, mediaId);
@@ -239,5 +336,5 @@ const finish = async (session, reply, voice) => {
       console.error('[flow] voice reply failed', error.message);
     }
   }
-  return reply;
+  return text;
 };

@@ -1,7 +1,26 @@
 import { money } from './agent.js';
 
+const PAYMENT = {
+  en: { ONLINE: 'payment link (KNET or card)', CASH: 'cash on delivery', CARD: 'card on delivery' },
+  ar: { ONLINE: 'رابط دفع (كي نت أو بطاقة)', CASH: 'كاش عند الاستلام', CARD: 'بطاقة عند الاستلام' },
+};
+
 const dictionary = {
   en: {
+    reviewOrder: ({ cart, customer: c, orderType, deliveryFee, paymentMethod, hasPin }) =>
+      [
+        'Please check your order:',
+        cart,
+        orderType === 'PICKUP' ? 'Pickup from the restaurant' : `Delivery fee: ${money(deliveryFee)}\nDeliver to: Area ${c.area}, Block ${c.block}, Street ${c.street}, Building ${c.building}${hasPin ? ' (map pin received)' : ''}`,
+        `Payment: ${PAYMENT.en[paymentMethod] || paymentMethod}`,
+        '',
+        'Tap "Confirm order" or reply "yes" — or tell me what to change.',
+      ].join('\n'),
+    confirmButton: 'Confirm order',
+    changeButton: 'Change something',
+    confirmPrompt: 'Confirm this order?',
+    whatToChange: 'Sure — what would you like to change?',
+    unsupportedMessage: 'I can read text messages, voice notes and location pins. Please type or record what you would like.',
     unclearVoice: 'Sorry, I could not make out that voice note. Could you say it again, or type your order?',
     aiUnavailable: 'Our ordering assistant is offline for a moment — please try again shortly.',
     closed: (hours) => `We are closed right now. Working hours: ${hours}. You can still tell me what you would like and order once we open.`,
@@ -37,6 +56,20 @@ const dictionary = {
     kitchenFeedback: (n, rating, comment) => `Feedback for order ${n}: ${rating}/5${comment ? ` — "${comment}"` : ''}`,
   },
   ar: {
+    reviewOrder: ({ cart, customer: c, orderType, deliveryFee, paymentMethod, hasPin }) =>
+      [
+        'راجع طلبك لو سمحت:',
+        cart,
+        orderType === 'PICKUP' ? 'استلام من المطعم' : `رسوم التوصيل: ${money(deliveryFee)}\nالتوصيل إلى: منطقة ${c.area}، قطعة ${c.block}، شارع ${c.street}، مبنى ${c.building}${hasPin ? ' (وصلني الموقع على الخريطة)' : ''}`,
+        `الدفع: ${PAYMENT.ar[paymentMethod] || paymentMethod}`,
+        '',
+        'اضغط "تأكيد الطلب" أو رد "إي"، أو قول لي شنو تبي تغيّر.',
+      ].join('\n'),
+    confirmButton: 'تأكيد الطلب',
+    changeButton: 'أبي أغيّر شي',
+    confirmPrompt: 'تأكد الطلب؟',
+    whatToChange: 'أكيد، شنو تبي تغيّر؟',
+    unsupportedMessage: 'أقدر أقرأ الرسائل المكتوبة والصوتية والموقع على الخريطة. اكتب أو سجّل طلبك لو سمحت.',
     unclearVoice: 'عذراً، ما قدرت أفهم الرسالة الصوتية. ممكن تعيدها أو تكتب طلبك؟',
     aiUnavailable: 'مساعد الطلبات غير متاح للحظات — جرّب مرة ثانية بعد قليل.',
     closed: (hours) => `المطعم مغلق حالياً. أوقات العمل: ${hours}. تقدر تقول لي طلبك وأجهزه لك أول ما نفتح.`,

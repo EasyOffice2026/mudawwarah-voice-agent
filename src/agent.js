@@ -16,7 +16,7 @@ const nullableString = { type: ['string', 'null'] };
 export const RESPONSE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['lang', 'reply', 'add', 'remove', 'customer', 'orderType', 'paymentMethod', 'action'],
+  required: ['lang', 'reply', 'add', 'remove', 'photos', 'customer', 'orderType', 'paymentMethod', 'action'],
   properties: {
     lang: { type: 'string', enum: ['en', 'ar'], description: 'Language the customer is using.' },
     reply: { type: 'string', description: 'What to say to the customer, in their language. Plain spoken text, 1-3 sentences.' },
@@ -29,12 +29,17 @@ export const RESPONSE_SCHEMA = {
         required: ['item', 'quantity', 'options'],
         properties: {
           item: { type: 'integer', description: 'Catalogue number.' },
-          quantity: { type: 'integer' },
+          quantity: { type: 'integer', description: 'TOTAL quantity wanted of this item with these options. Repeating an item already in the cart updates its quantity.' },
           options: { type: 'array', items: { type: 'string' }, description: 'Option codes like "3a".' },
         },
       },
     },
     remove: { type: 'array', items: { type: 'integer' }, description: 'Cart line numbers to remove.' },
+    photos: {
+      type: 'array',
+      items: { type: 'integer' },
+      description: 'Catalogue numbers whose photo to send with this reply (at most 3). Empty unless the customer wants to see items.',
+    },
     customer: {
       type: 'object',
       description: 'Newly learned details only; null for anything not mentioned in this message.',
@@ -157,6 +162,7 @@ export const systemPrompt = ({ settings, catalogue, session, restaurantName, onl
     c.notes && `notes: ${c.notes}`,
     session.orderType && `order type: ${session.orderType}`,
     session.paymentMethod && `payment: ${session.paymentMethod}`,
+    session.location && 'map pin: shared',
   ].filter(Boolean);
   const pickup = settings.pickupEnabled === 'true';
 
@@ -174,11 +180,14 @@ SELLING
 - Add items with "add" only when the customer clearly asked for them. If an item has a REQUIRED option group the customer did not specify, do NOT add it — ask which option they want and list the choices briefly. Quantities 1-20.
 - Use catalogue numbers and option codes; never state a price that is not in the catalogue. After adding, confirm what was added and the cart subtotal, then ask if they want anything else or to complete the order.
 - "remove" takes cart line numbers from CURRENT CART.
+- You CAN show photos: put up to 3 catalogue numbers in "photos" when the customer asks to see items, asks for pictures, or asks what something looks like. The photos arrive with the item name and price, so keep your reply short. Never say you cannot show pictures.
+- Items in CURRENT CART are already added. Never put them in "add" again just to confirm them. Only when the customer changes how many they want, send the item with the new TOTAL quantity.
 
 COMPLETING THE ORDER
 - When the customer is done, collect whatever is still missing, one or two questions at a time, and record it in "customer", "orderType" and "paymentMethod" (only what was said in this message; null otherwise).
-- ${pickup ? 'Delivery and pickup are both offered; ask which they prefer if unknown.' : 'Delivery only.'} Delivery needs area, block, street and building. Payment options: ${payments.map((m) => `${m} (${PAYMENT_LABELS[m]})`).join(', ')}${onlinePayment ? ' — recommend ONLINE first; the system sends the payment link after the order is placed.' : '.'}
-- Before placing, read back the full order once: items, address or pickup, payment, total. When everything is known and the customer confirms, set action "place_order". Never claim an order is placed or paid yourself — the system confirms it with an order number and sends the payment link.
+- ${pickup ? 'Delivery and pickup are both offered; ask which they prefer if unknown.' : 'Delivery only.'} Delivery needs area, block, street and building.
+- Customers may share a WhatsApp location pin (it appears as "[Shared a map location …]"). Thank them; the pin goes to the driver. Take area/block/street/building from the pin's address text when it contains them, and still ask for anything missing. Payment options: ${payments.map((m) => `${m} (${PAYMENT_LABELS[m]})`).join(', ')}${onlinePayment ? ' — recommend ONLINE first; the system sends the payment link after the order is placed.' : '.'}
+- When everything is known and the customer wants to finish, set action "place_order". The system then shows the customer the exact order from CURRENT CART with the total and asks them to confirm, so do not list the items or prices yourself in that reply. When the customer confirms (yes, إي، تمام، أكد), set "place_order" again and the order is placed. Never claim an order is placed or paid yourself — the system confirms it with an order number and sends the payment link.
 - Once an order is placed the kitchen is notified automatically and the customer receives updates here when it is being prepared, ready, out for delivery and delivered; if asked, say so.
 - Actions: "show_cart" when they ask what is in the cart; "clear_cart" only when clearly asked; "order_status" when they ask about their last order; "human" when they insist on talking to a person or complain seriously.
 ${isOpen ? '' : `- The restaurant is CLOSED now (hours: ${settings.workingHours}). Take items into the cart if they like, but explain the order can only be placed during working hours.\n`}
@@ -221,6 +230,15 @@ export const applyCartChanges = (cart, result, catalogue) => {
       if (seen.has(option.groupEn)) continue;
       seen.add(option.groupEn);
       optionIds.push(option.id);
+    }
+    // The model tends to repeat an item on later turns; the same item with the same options sets the line's
+    // quantity instead of stacking a duplicate (one Dinner Box was once ordered as four this way).
+    const sameKey = [...optionIds].sort().join(',');
+    const existing = next.find((l) => l.menuItemId === entry.item.id && [...(l.optionIds || [])].sort().join(',') === sameKey);
+    if (existing) {
+      if (existing.quantity !== quantity) added.push({ entry, quantity });
+      existing.quantity = quantity;
+      continue;
     }
     next.push({ menuItemId: entry.item.id, quantity, optionIds });
     added.push({ entry, quantity });

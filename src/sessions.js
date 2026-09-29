@@ -47,6 +47,8 @@ export const blank = (phone, waName) => ({
   customer: { name: null, area: null, block: null, street: null, building: null, notes: null },
   paymentMethod: null,
   orderType: null,
+  location: null,
+  awaitingConfirmation: false,
   lastOrderId: null,
   lastOrderNumber: null,
   history: [],
@@ -89,6 +91,8 @@ export const resetOrder = (session) => {
   session.cart = [];
   session.paymentMethod = null;
   session.orderType = null;
+  session.location = null;
+  session.awaitingConfirmation = false;
   return save(session);
 };
 
