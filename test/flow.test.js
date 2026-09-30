@@ -319,9 +319,16 @@ test('a first greeting gets the welcome and the main menu list, without calling 
   assert.deepEqual(listOf(welcome).map((r) => r.id), ['menu:browse', 'menu:track', 'menu:pay', 'menu:complaint', 'menu:team']);
   assert.equal(prompts.length, 0);
 
-  // A second "hi" in the same conversation is a normal message for the agent.
-  modelTurns.push(turn('ar', 'هلا فيك! شنو تحب تطلب؟'));
-  await handleInbound({ phone: PHONE, text: 'هلا' });
+  // A greeting later in the conversation gets the welcome and menu again, in the language it was said in.
+  await handleInbound({ phone: PHONE, text: 'Hello' });
+  const again = sentMessages(calls).filter((m) => m.to === PHONE).at(-1);
+  assert.match(again.text, /Welcome to Mudawwarah/);
+  assert.equal(again.body.interactive.type, 'list');
+  assert.equal(prompts.length, 0);
+
+  // Anything more than a greeting goes to the agent.
+  modelTurns.push(turn('en', 'Sure! What would you like?'));
+  await handleInbound({ phone: PHONE, text: 'Hello, I want to order dinner' });
   assert.equal(prompts.length, 1);
 });
 

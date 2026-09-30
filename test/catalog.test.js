@@ -165,6 +165,26 @@ function describe_withCatalogue() {
     assert.match(sentTexts(calls).at(-1).text, /Order MD-1001 is confirmed\.\n2 × Chicken Shawarma\n4 × Cola/);
   });
 
+  test('if WhatsApp rejects the catalogue message, the customer gets the category list instead', async () => {
+    let productListCalls = 0;
+    calls = mockFetch({
+      'GET /categories': () => ({ json: menu }),
+      'POST /12345/messages': (_url, init) => {
+        if (JSON.parse(init.body).interactive?.type === 'product_list') {
+          productListCalls += 1;
+          return { status: 400, json: { error: { message: 'Catalog not linked' } } };
+        }
+        return { json: { messages: [{ id: 'wamid.1' }] } };
+      },
+    });
+    sessions.get(PHONE).greeted = true;
+    await handleInbound({ phone: PHONE, text: 'menu' });
+    assert.equal(productListCalls, 1);
+    const last = sentMessages(calls).at(-1);
+    assert.equal(last.body.interactive.type, 'list');
+    assert.deepEqual(last.body.interactive.action.sections[0].rows.map((r) => r.id), ['cat:cat-1:0', 'cat:cat-2:0']);
+  });
+
   test('a cart with nothing still on the menu gets a clear answer and no model call', async () => {
     await handleInbound({ phone: PHONE, cartOrder: [{ retailerId: 'discontinued', quantity: 1 }], text: '' });
     assert.match(sentTexts(calls).at(-1).text, /no longer available/);

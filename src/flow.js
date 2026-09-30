@@ -504,10 +504,15 @@ export const handleInbound = async ({ phone, waName, text, replyId, audioId, mim
     }
   }
 
-  // First contact: greet and show the main menu. A first message that already asks for something goes to the agent.
+  // A greeting ("hi", "السلام عليكم", "هلا"…) always gets the welcome and the main menu, and so does an empty
+  // first message. A message that already asks for something goes to the agent.
   const firstContact = !session.greeted && !session.history.length;
   session.greeted = true;
-  if (firstContact && !replyId && (!utterance.trim() || GREETING.test(utterance.trim()))) return finish(session, mainMenu(session.lang, copy().welcome), false);
+  const greeting = GREETING.test(utterance.trim());
+  if (!replyId && !cartOrder && (greeting || (firstContact && !utterance.trim()))) {
+    if (greeting) session.lang = detectLang(utterance, session.lang);
+    return finish(session, mainMenu(session.lang, copy().welcome), false);
+  }
 
   const afterSales = await handleAfterSales(session, { text: utterance, replyId });
   if (afterSales) return finish(session, afterSales, fromVoice);
@@ -541,8 +546,16 @@ const finish = async (session, reply, voice) => {
   }
   if (productLists?.length) {
     if (text) await wa.sendText(session.phone, text);
-    for (const productList of productLists) await wa.sendProductList(session.phone, productList);
-    return text || t(session.lang).catalogBody;
+    try {
+      for (const productList of productLists) await wa.sendProductList(session.phone, productList);
+      return text || t(session.lang).catalogBody;
+    } catch (error) {
+      // e.g. the catalogue is not (or no longer) linked to this number: fall back to the category list.
+      console.error('[flow] catalogue message failed, sending the category list instead', error.message);
+      const fallback = await categoriesMenu(session.lang);
+      await wa.sendList(session.phone, fallback.text, fallback.list.button, fallback.list.sections);
+      return fallback.text;
+    }
   }
   if (list) {
     if (text.length <= 1024) {
