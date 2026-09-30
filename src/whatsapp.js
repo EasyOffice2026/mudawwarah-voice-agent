@@ -89,6 +89,30 @@ export const sendProductList = (to, { catalogId, header, body, sections }) =>
     },
   });
 
+/** A WhatsApp Flow message: a button that opens the form inside WhatsApp at its first screen. */
+export const sendFlow = (to, { flowId, header, body, cta, screen, token, mode = 'published' }) =>
+  send({
+    to,
+    type: 'interactive',
+    interactive: {
+      type: 'flow',
+      header: { type: 'text', text: truncate(header, 60) },
+      body: { text: truncate(body, 1024) },
+      action: {
+        name: 'flow',
+        parameters: {
+          flow_message_version: '3',
+          ...(mode === 'draft' ? { mode: 'draft' } : {}),
+          flow_token: token,
+          flow_id: flowId,
+          flow_cta: truncate(cta, 20),
+          flow_action: 'navigate',
+          flow_action_payload: { screen },
+        },
+      },
+    },
+  });
+
 /** Sends a publicly reachable image (JPEG/PNG, max 5 MB) by link. */
 export const sendImage = (to, link, caption) => send({ to, type: 'image', image: { link, caption: truncate(caption || '', 1024) } });
 
@@ -138,6 +162,16 @@ export const verifySignature = (rawBody, signatureHeader) => {
 export const extractInput = (message) => {
   if (message.type === 'text') return { text: message.text?.body || '' };
   if (message.type === 'interactive') {
+    // A completed Flow form: the answers arrive as a JSON string.
+    if (message.interactive?.type === 'nfm_reply') {
+      let response = {};
+      try {
+        response = JSON.parse(message.interactive.nfm_reply?.response_json || '{}');
+      } catch {
+        response = {};
+      }
+      return { text: '', flowReply: response };
+    }
     const reply = message.interactive?.button_reply || message.interactive?.list_reply;
     if (reply) return { replyId: reply.id, text: reply.title || '' };
   }

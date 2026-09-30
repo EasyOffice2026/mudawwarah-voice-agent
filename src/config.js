@@ -27,6 +27,12 @@ export const config = {
     // Token with catalog_management for uploading the menu (defaults to WHATSAPP_TOKEN).
     catalogToken: process.env.WHATSAPP_CATALOG_TOKEN || '',
     catalogSiteUrl: process.env.CATALOG_SITE_URL || '',
+    // Published WhatsApp Flow with the menu as a multi-item order form (npm run flow:sync prints it).
+    orderFlowId: process.env.WHATSAPP_ORDER_FLOW_ID || '',
+    // "draft" sends an unpublished form, for testing until Meta allows publishing (verified business / real number).
+    orderFlowMode: process.env.WHATSAPP_ORDER_FLOW_MODE === 'draft' ? 'draft' : 'published',
+    // WhatsApp Business Account that owns the Flow.
+    wabaId: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || '',
   },
   payment: {
     provider: (process.env.PAYMENT_PROVIDER || 'none').toLowerCase(),

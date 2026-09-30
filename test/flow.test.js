@@ -435,7 +435,7 @@ test('free text or voice reaches the same features through the agent: complaint,
     turn('ar', 'لحظة أشوف.', { action: 'order_status' }),
   );
   await handleInbound({ phone: PHONE, text: 'الأكل وصلني بارد' });
-  assert.match(sentTexts(calls).at(-1).text, /نعتذر منك!\n\nتم تسجيل شكواك برقم C-0001/);
+  assert.equal(sentTexts(calls).at(-1).text, 'نعتذر منك وايد على هالشي 🙏\n\nتم تسجيل شكواك برقم C-0001. فريقنا بيراجعها ويتواصل معك قريب.');
   assert.equal(orders.listComplaints()[0].text, 'الأكل وصل بارد');
 
   await handleInbound({ phone: PHONE, audioId: 'media-1', mimeType: 'audio/ogg' });
@@ -557,7 +557,50 @@ test('place_order with missing details asks for them instead of calling the API'
   modelTurns.push(turn('en', 'Placing it.', { add: [{ item: 2, quantity: 4, options: [] }], action: 'place_order' }));
   await handleInbound({ phone: PHONE, text: 'four colas, order now' });
   assert.equal(createdOrders.length, 0);
-  assert.match(sentTexts(calls)[0].text, /Before I place the order I still need: your name, your area, block, street, building\/house number, how you want to pay/);
+  // Only the system speaks: the model's "Placing it." must not appear next to "I still need…".
+  assert.equal(sentTexts(calls)[0].text, 'Before I place the order I still need: your name, delivery or pickup, how you want to pay.');
+});
+
+test('the message that completes the order details brings the summary, not another question', async () => {
+  branches = [JAHRA];
+  Object.assign(sessions.get(PHONE), {
+    greeted: true,
+    lang: 'ar',
+    cart: [{ menuItemId: 'item-shawarma', quantity: 2, optionIds: ['opt-garlic'] }],
+    orderType: 'PICKUP',
+    pickupLocationId: 'b-jahra',
+  });
+  modelTurns.push(turn('ar', 'تمام عبدالله. شنو عنوانك؟', { customer: { name: 'عبدالله', area: null, block: null, street: null, building: null, notes: null }, paymentMethod: 'CASH' }));
+  await handleInbound({ phone: PHONE, text: 'اسمي عبدالله والدفع كاش' });
+  const reply = sentMessages(calls).at(-1);
+  assert.match(reply.text, /^راجع طلبك لو سمحت:/);
+  assert.doesNotMatch(reply.text, /عنوانك/);
+  assert.equal(reply.body.interactive.type, 'button');
+
+  // Adding an item without new details is a normal turn.
+  modelTurns.push(turn('ar', 'ضفت لك كولا.', { add: [{ item: 2, quantity: 1, options: [] }] }));
+  await handleInbound({ phone: PHONE, text: 'وكولا' });
+  assert.equal(sentTexts(calls).at(-1).text, 'ضفت لك كولا.');
+});
+
+test('a blocked order is never announced as placed: minimum order and old Confirm buttons get the real status', async () => {
+  Object.assign(sessions.get(PHONE), {
+    greeted: true,
+    lang: 'en',
+    cart: [{ menuItemId: 'item-cola', quantity: 1, optionIds: [] }],
+    customer: { name: 'Ali', area: 'Salmiya', block: '4', street: '5', building: '12', notes: null },
+    orderType: 'DELIVERY',
+    paymentMethod: 'CASH',
+  });
+  modelTurns.push(turn('en', 'Your order has been placed successfully!', { action: 'place_order' }));
+  await handleInbound({ phone: PHONE, text: 'place it' });
+  assert.equal(sentTexts(calls).at(-1).text, 'The minimum order is 2.000 KWD — shall I add something else?');
+
+  // An old Confirm button does not reach the model: it gets the same real status.
+  await handleInbound({ phone: PHONE, replyId: 'order:confirm', text: 'Confirm order' });
+  assert.equal(sentTexts(calls).at(-1).text, 'The minimum order is 2.000 KWD — shall I add something else?');
+  assert.equal(createdOrders.length, 0);
+  assert.equal(prompts.length, 1);
 });
 
 test('a not-received reply alerts the kitchen', async () => {
