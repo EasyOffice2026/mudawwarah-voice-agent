@@ -7,11 +7,15 @@ const PAYMENT = {
 
 const dictionary = {
   en: {
-    reviewOrder: ({ cart, customer: c, orderType, deliveryFee, paymentMethod, hasPin }) =>
+    reviewOrder: ({ cart, customer: c, orderType, deliveryFee, paymentMethod, hasPin, branch }) =>
       [
         'Please check your order:',
         cart,
-        orderType === 'PICKUP' ? 'Pickup from the restaurant' : `Delivery fee: ${money(deliveryFee)}\nDeliver to: Area ${c.area}, Block ${c.block}, Street ${c.street}, Building ${c.building}${hasPin ? ' (map pin received)' : ''}`,
+        orderType === 'PICKUP'
+          ? branch
+            ? `Pickup from our ${branch.name} branch (ready about ${branch.prep} min after you confirm)`
+            : 'Pickup from the restaurant'
+          : `Delivery fee: ${money(deliveryFee)}\nDeliver to: Area ${c.area}, Block ${c.block}, Street ${c.street}, Building ${c.building}${hasPin ? ' (map pin received)' : ''}`,
         `Payment: ${PAYMENT.en[paymentMethod] || paymentMethod}`,
         '',
         'Tap "Confirm order" or reply "yes" — or tell me what to change.',
@@ -35,11 +39,31 @@ const dictionary = {
     menuTitle: 'Mudawwarah',
     menuRows: [
       { id: 'menu:browse', title: 'Browse the menu', description: 'Categories, items and prices' },
+      { id: 'menu:pickup', title: 'Pickup branches', description: 'Order ahead and collect from a branch' },
       { id: 'menu:track', title: 'Track my order', description: 'Status of your latest order' },
       { id: 'menu:pay', title: 'Payment link', description: 'Pay your order by KNET or card' },
       { id: 'menu:complaint', title: 'Complaint / support', description: 'Report a problem to our team' },
       { id: 'menu:team', title: 'Talk to our team', description: 'Chat with a staff member' },
     ],
+    pickupIntro: 'Choose the branch you want to pick up from:',
+    branchesButton: 'Branches',
+    pickupUnavailable: 'Pickup is not available right now, but we can deliver to you.',
+    branchRow: (open, hours, prep) => `${open ? 'Open now' : 'Closed now'}${hours && hours !== 'closed' ? ` · ${hours === '24h' ? '24 hours' : hours}` : ''} · ready in ~${prep} min`,
+    branchChosen: ({ name, open, hours, opens, prep, details }) =>
+      [
+        `📍 ${name} branch`,
+        hours ? `Today: ${hours === '24h' ? 'open 24 hours' : hours === 'closed' ? 'closed' : hours}` : null,
+        open ? `Open now — your order is ready about ${prep} minutes after you confirm it.` : `Closed now${opens ? ` — opens at ${opens}` : ''}. Choose another branch, or order once it opens.`,
+        details || null,
+        '',
+        `Pickup from ${name} is set. What would you like to order?`,
+      ]
+        .filter((line) => line !== null)
+        .join('\n'),
+    browseButton: 'Browse the menu',
+    changeBranchButton: 'Change branch',
+    reviewButton: 'Review my order',
+    branchClosed: (name, opens) => `Our ${name} branch is closed right now${opens ? ` and opens at ${opens}` : ''}. Please choose another branch or order for delivery.`,
     catalogHeader: 'Mudawwarah menu',
     catalogBody: 'Browse, tap an item to add it to your cart, then press "Place order".',
     cartUnavailable: 'Sorry, the items in your cart are no longer available. Type "menu" to see what we have today.',
@@ -63,7 +87,8 @@ const dictionary = {
     status: {
       CONFIRMED: (n) => `Order ${n} is confirmed by the kitchen.`,
       PREPARING: (n) => `Order ${n} is being prepared.`,
-      READY: (n, type) => (type === 'PICKUP' ? `Order ${n} is ready for pickup!` : `Order ${n} is ready and on its way to you.`),
+      READY: (n, type, branch) =>
+        type === 'PICKUP' ? `Order ${n} is ready for pickup${branch ? ` at our ${branch} branch` : ''}!` : `Order ${n} is ready and on its way to you.`,
       OUT_FOR_DELIVERY: (n) => `Order ${n} is out for delivery 🛵`,
       REACHED: (n) => `Our driver has reached your location with order ${n}.`,
       DELIVERED: (n) => `Order ${n} has been delivered.`,
@@ -97,11 +122,15 @@ const dictionary = {
     kitchenFeedback: (n, rating, comment) => `Feedback for order ${n}: ${rating}/5${comment ? ` — "${comment}"` : ''}`,
   },
   ar: {
-    reviewOrder: ({ cart, customer: c, orderType, deliveryFee, paymentMethod, hasPin }) =>
+    reviewOrder: ({ cart, customer: c, orderType, deliveryFee, paymentMethod, hasPin, branch }) =>
       [
         'راجع طلبك لو سمحت:',
         cart,
-        orderType === 'PICKUP' ? 'استلام من المطعم' : `رسوم التوصيل: ${money(deliveryFee)}\nالتوصيل إلى: منطقة ${c.area}، قطعة ${c.block}، شارع ${c.street}، مبنى ${c.building}${hasPin ? ' (وصلني الموقع على الخريطة)' : ''}`,
+        orderType === 'PICKUP'
+          ? branch
+            ? `استلام من فرع ${branch.name} (يكون جاهز تقريباً بعد ${branch.prep} دقيقة من التأكيد)`
+            : 'استلام من المطعم'
+          : `رسوم التوصيل: ${money(deliveryFee)}\nالتوصيل إلى: منطقة ${c.area}، قطعة ${c.block}، شارع ${c.street}، مبنى ${c.building}${hasPin ? ' (وصلني الموقع على الخريطة)' : ''}`,
         `الدفع: ${PAYMENT.ar[paymentMethod] || paymentMethod}`,
         '',
         'اضغط "تأكيد الطلب" أو رد "إي"، أو قول لي شنو تبي تغيّر.',
@@ -125,11 +154,31 @@ const dictionary = {
     menuTitle: 'مدورة',
     menuRows: [
       { id: 'menu:browse', title: 'تصفح المنيو', description: 'الأقسام والأصناف والأسعار' },
+      { id: 'menu:pickup', title: 'فروع الاستلام', description: 'اطلب مسبقاً واستلم من أقرب فرع' },
       { id: 'menu:track', title: 'تتبع طلبي', description: 'حالة آخر طلب لك' },
       { id: 'menu:pay', title: 'رابط الدفع', description: 'ادفع طلبك بالكي نت أو البطاقة' },
       { id: 'menu:complaint', title: 'شكوى / مساعدة', description: 'بلّغ فريقنا عن أي مشكلة' },
       { id: 'menu:team', title: 'كلّم فريقنا', description: 'تواصل مع أحد الموظفين' },
     ],
+    pickupIntro: 'اختر الفرع اللي تبي تستلم منه:',
+    branchesButton: 'الفروع',
+    pickupUnavailable: 'الاستلام من الفرع غير متاح حالياً، بس نقدر نوصل لك الطلب.',
+    branchRow: (open, hours, prep) => `${open ? 'مفتوح الحين' : 'مسكّر الحين'}${hours && hours !== 'closed' ? ` · ${hours === '24h' ? '24 ساعة' : hours}` : ''} · جاهز خلال ~${prep} دقيقة`,
+    branchChosen: ({ name, open, hours, opens, prep, details }) =>
+      [
+        `📍 فرع ${name}`,
+        hours ? `اليوم: ${hours === '24h' ? 'مفتوح 24 ساعة' : hours === 'closed' ? 'مسكّر' : hours}` : null,
+        open ? `مفتوح الحين — طلبك يكون جاهز تقريباً بعد ${prep} دقيقة من التأكيد.` : `مسكّر الحين${opens ? ` — يفتح الساعة ${opens}` : ''}. اختر فرع ثاني أو اطلب أول ما يفتح.`,
+        details || null,
+        '',
+        `تم اختيار الاستلام من فرع ${name}. شنو تحب تطلب؟`,
+      ]
+        .filter((line) => line !== null)
+        .join('\n'),
+    browseButton: 'تصفح المنيو',
+    changeBranchButton: 'غيّر الفرع',
+    reviewButton: 'راجع طلبي',
+    branchClosed: (name, opens) => `فرع ${name} مسكّر الحين${opens ? ` ويفتح الساعة ${opens}` : ''}. اختر فرع ثاني أو اطلب توصيل.`,
     catalogHeader: 'منيو مدورة',
     catalogBody: 'تصفح المنيو، اضغط على الصنف عشان تضيفه للسلة، وبعدين اضغط "إرسال الطلب".',
     cartUnavailable: 'نعتذر، الأصناف اللي في سلتك ما عادت متوفرة. اكتب "منيو" عشان تشوف المتوفر اليوم.',
@@ -151,7 +200,8 @@ const dictionary = {
     status: {
       CONFIRMED: (n) => `المطبخ أكد الطلب ${n}.`,
       PREPARING: (n) => `الطلب ${n} قيد التجهيز.`,
-      READY: (n, type) => (type === 'PICKUP' ? `الطلب ${n} جاهز للاستلام!` : `الطلب ${n} جاهز وفي الطريق إليك.`),
+      READY: (n, type, branch) =>
+        type === 'PICKUP' ? `الطلب ${n} جاهز للاستلام${branch ? ` من فرع ${branch}` : ''}!` : `الطلب ${n} جاهز وفي الطريق إليك.`,
       OUT_FOR_DELIVERY: (n) => `طلبك ${n} طلع للتوصيل 🛵`,
       REACHED: (n) => `المندوب وصل عند موقعك بالطلب ${n}.`,
       DELIVERED: (n) => `تم توصيل الطلب ${n}.`,

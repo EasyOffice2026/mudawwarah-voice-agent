@@ -17,6 +17,7 @@ const turn = (lang, reply, extra = {}) => ({
   add: [],
   remove: [],
   photos: [],
+  pickupBranch: null,
   customer: { name: null, area: null, block: null, street: null, building: null, notes: null },
   orderType: null,
   paymentMethod: null,
@@ -30,6 +31,12 @@ let prompts = [];
 let createdOrders = [];
 let calls;
 let orderStatus = 'PENDING';
+let branches = [];
+
+// Pickup branches as the website returns them: open 24h (equal open/close) or closed every day.
+const allWeek = (entry) => Array.from({ length: 7 }, (_, day) => ({ day, ...entry }));
+const JAHRA = { id: 'b-jahra', nameEn: 'Al Jahra', nameAr: '???????', addressEn: 'Block 3, Street 10', phone: '+965 2200 1111', hours: allWeek({ open: '00:00', close: '00:00', closed: false }), prepMinutes: 25, isActive: true };
+const ARDIYA = { id: 'b-ardiya', nameEn: 'Al Ardiya', nameAr: 'العارضية', hours: allWeek({ open: '09:00', close: '23:00', closed: true }), prepMinutes: 30, isActive: true };
 
 beforeEach(() => {
   sessions.clearAll();
@@ -39,13 +46,16 @@ beforeEach(() => {
   prompts = [];
   createdOrders = [];
   orderStatus = 'PENDING';
+  branches = [];
   calls = mockFetch({
     'GET /categories': () => ({ json: menu }),
     'GET /settings': () => ({ json: settings }),
+    'GET /pickup-locations': () => ({ json: branches }),
     'POST /orders': (_url, init) => {
       const payload = JSON.parse(init.body);
       createdOrders.push(payload);
-      return { json: { id: 'order-1', orderNumber: 'MD-1001', status: 'PENDING', total: '4.000', orderType: payload.orderType, paymentMethod: payload.paymentMethod, customerName: payload.customerName, customerPhone: payload.customerPhone, address: payload.address, items: [{ nameEn: 'Chicken Shawarma', quantity: 2, customizations: [{ nameEn: 'Garlic' }] }] } };
+      const pickupLocation = branches.find((b) => b.id === payload.pickupLocationId) || null;
+      return { json: { id: 'order-1', orderNumber: 'MD-1001', status: 'PENDING', total: '4.000', orderType: payload.orderType, paymentMethod: payload.paymentMethod, customerName: payload.customerName, customerPhone: payload.customerPhone, address: payload.address, pickupLocation, items: [{ nameEn: 'Chicken Shawarma', quantity: 2, customizations: [{ nameEn: 'Garlic' }] }] } };
     },
     'GET /orders/track/order-1': () => ({ json: { id: 'order-1', orderNumber: 'MD-1001', status: orderStatus, orderType: 'DELIVERY' } }),
     'POST /chat/completions': (_url, init) => {
@@ -316,7 +326,7 @@ test('a first greeting gets the welcome and the main menu list, without calling 
   const [welcome] = sentMessages(calls).filter((m) => m.to === PHONE);
   assert.equal(welcome.body.interactive.type, 'list');
   assert.match(welcome.text, /هلا والله ومرحبا فيك في مدورة/);
-  assert.deepEqual(listOf(welcome).map((r) => r.id), ['menu:browse', 'menu:track', 'menu:pay', 'menu:complaint', 'menu:team']);
+  assert.deepEqual(listOf(welcome).map((r) => r.id), ['menu:browse', 'menu:pickup', 'menu:track', 'menu:pay', 'menu:complaint', 'menu:team']);
   assert.equal(prompts.length, 0);
 
   // A greeting later in the conversation gets the welcome and menu again, in the language it was said in.
@@ -450,6 +460,97 @@ test('every dashboard status change reaches the customer, including Out for deli
   }
   const texts = sentTexts(calls).filter((m) => m.to === PHONE).map((m) => m.text);
   assert.deepEqual(texts, ['الطلب MD-1001 قيد التجهيز.', 'طلبك MD-1001 طلع للتوصيل 🛵', 'المندوب وصل عند موقعك بالطلب MD-1001.', 'تم توصيل الطلب MD-1001.']);
+});
+
+test('"Pickup branches" lists every branch with open/closed, hours and prep time; broken Arabic names fall back to English', async () => {
+  branches = [JAHRA, ARDIYA];
+  Object.assign(sessions.get(PHONE), { greeted: true, lang: 'ar' });
+  await handleInbound({ phone: PHONE, replyId: 'menu:pickup', text: 'فروع الاستلام' });
+  const list = sentMessages(calls).at(-1);
+  assert.match(list.text, /اختر الفرع اللي تبي تستلم منه/);
+  assert.deepEqual(listOf(list).map((r) => [r.id, r.title, r.description]), [
+    ['branch:b-jahra', 'Al Jahra', 'مفتوح الحين · 24 ساعة · جاهز خلال ~25 دقيقة'],
+    ['branch:b-ardiya', 'العارضية', 'مسكّر الحين · جاهز خلال ~30 دقيقة'],
+  ]);
+});
+
+test('tapping a branch makes the order pickup from it; review, order payload, kitchen and "ready" message all name it', async () => {
+  branches = [JAHRA, ARDIYA];
+  Object.assign(sessions.get(PHONE), {
+    greeted: true,
+    lang: 'en',
+    cart: [{ menuItemId: 'item-shawarma', quantity: 2, optionIds: ['opt-garlic'] }],
+    customer: { name: 'Sara', area: null, block: null, street: null, building: null, notes: null },
+    paymentMethod: 'CASH',
+  });
+  await handleInbound({ phone: PHONE, replyId: 'branch:b-jahra', text: 'Al Jahra' });
+  const chosen = sentMessages(calls).at(-1);
+  assert.match(chosen.text, /📍 Al Jahra branch\nToday: open 24 hours\nOpen now — your order is ready about 25 minutes after you confirm it\.\nBlock 3, Street 10\n☎️ \+965 2200 1111/);
+  assert.deepEqual(chosen.body.interactive.action.buttons.map((b) => b.reply.id), ['menu:browse', 'menu:pickup', 'order:review']);
+  assert.equal(sessions.get(PHONE).orderType, 'PICKUP');
+
+  // No address is needed for pickup: "Review my order" goes straight to the summary.
+  await handleInbound({ phone: PHONE, replyId: 'order:review', text: 'Review my order' });
+  assert.match(sentMessages(calls).at(-1).text, /Pickup from our Al Jahra branch \(ready about 25 min after you confirm\)/);
+  assert.doesNotMatch(sentMessages(calls).at(-1).text, /Delivery fee/);
+  await handleInbound({ phone: PHONE, replyId: 'order:confirm', text: 'Confirm order' });
+  assert.equal(createdOrders[0].orderType, 'PICKUP');
+  assert.equal(createdOrders[0].pickupLocationId, 'b-jahra');
+  assert.equal(createdOrders[0].address, undefined);
+  assert.match(sentTexts(calls).filter((m) => m.to === KITCHEN).at(-1).text, /PICKUP — Al Jahra branch/);
+
+  const entry = orders.get('order-1');
+  entry.orderType = 'PICKUP';
+  orderStatus = 'READY';
+  await orders.pollOnce();
+  assert.match(sentTexts(calls).filter((m) => m.to === PHONE).at(-1).text, /Order MD-1001 is ready for pickup at our Al Jahra branch!/);
+});
+
+test('by text or voice: the agent picks the branch by number, and pickup without a branch asks which one', async () => {
+  branches = [JAHRA, ARDIYA];
+  Object.assign(sessions.get(PHONE), {
+    greeted: true,
+    lang: 'ar',
+    cart: [{ menuItemId: 'item-shawarma', quantity: 2, optionIds: ['opt-garlic'] }],
+    customer: { name: 'Sara', area: null, block: null, street: null, building: null, notes: null },
+    paymentMethod: 'CASH',
+  });
+  modelTurns.push(
+    turn('ar', 'تمام.', { orderType: 'PICKUP', action: 'place_order' }),
+    turn('ar', 'حلو، الجهراء.', { pickupBranch: 1, action: 'place_order' }),
+  );
+  await handleInbound({ phone: PHONE, text: 'باخذه استلام' });
+  assert.match(prompts[0].messages[0].content, /PICKUP BRANCHES[\s\S]*\[1\] Al Jahra — OPEN now, today 24h, ready ~25 min[\s\S]*\[2\] Al Ardiya \/ العارضية — CLOSED now, today closed, ready ~30 min/);
+  assert.match(sentTexts(calls).at(-1).text, /قبل تأكيد الطلب أحتاج: أي فرع تبي تستلم منه/);
+
+  await handleInbound({ phone: PHONE, text: 'من الجهراء' });
+  assert.equal(sessions.get(PHONE).pickupLocationId, 'b-jahra');
+  assert.match(sentMessages(calls).at(-1).text, /استلام من فرع Al Jahra \(يكون جاهز تقريباً بعد 25 دقيقة من التأكيد\)/);
+});
+
+test('a closed branch cannot take the order; the customer is told when it opens', async () => {
+  branches = [JAHRA, ARDIYA];
+  Object.assign(sessions.get(PHONE), {
+    greeted: true,
+    lang: 'en',
+    cart: [{ menuItemId: 'item-shawarma', quantity: 2, optionIds: ['opt-garlic'] }],
+    customer: { name: 'Sara', area: null, block: null, street: null, building: null, notes: null },
+    orderType: 'PICKUP',
+    pickupLocationId: 'b-ardiya',
+    paymentMethod: 'CASH',
+  });
+  modelTurns.push(turn('en', 'Let me check.', { action: 'place_order' }));
+  await handleInbound({ phone: PHONE, text: 'place it' });
+  assert.match(sentTexts(calls).at(-1).text, /Our Al Ardiya branch is closed right now\. Please choose another branch or order for delivery\./);
+  assert.equal(createdOrders.length, 0);
+});
+
+test('switching to delivery drops the chosen branch', async () => {
+  branches = [JAHRA];
+  Object.assign(sessions.get(PHONE), { greeted: true, lang: 'en', orderType: 'PICKUP', pickupLocationId: 'b-jahra' });
+  modelTurns.push(turn('en', 'Delivery it is. What is your address?', { orderType: 'DELIVERY' }));
+  await handleInbound({ phone: PHONE, text: 'actually deliver it please' });
+  assert.equal(sessions.get(PHONE).pickupLocationId, null);
 });
 
 test('place_order with missing details asks for them instead of calling the API', async () => {

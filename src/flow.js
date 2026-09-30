@@ -7,6 +7,7 @@ import * as orders from './orders.js';
 import * as payment from './payment.js';
 import { t } from './copy.js';
 import { isCatalogEnabled, productListGroups, cartFromOrder } from './catalog.js';
+import { getBranches, isBranchOpen, todaysHours, nextOpening, branchName } from './branches.js';
 import {
   RESPONSE_SCHEMA,
   money,
@@ -30,12 +31,17 @@ const composeAddress = (c) => [c.area && `Area ${c.area}`, c.block && `Block ${c
 /** Mdawra's payment enum has no ONLINE value; a payment link in Kuwait is KNET. */
 const mdawraPaymentMethod = (method) => (method === 'ONLINE' ? 'KNET' : method || 'CASH');
 
+/** The pickup branch the customer chose, when the order is for pickup. */
+const chosenBranch = (session, branches) => (session.orderType === 'PICKUP' ? branches.find((b) => b.id === session.pickupLocationId) || null : null);
+
 /** Why the order cannot be placed yet, as a message for the customer, or null when it can. */
-const orderBlocker = (session, settings, catalogue) => {
+const orderBlocker = (session, settings, catalogue, branches = []) => {
   const copy = t(session.lang);
   if (settings.isOpen === 'false') return copy.closed(settings.workingHours);
-  const { missing } = missingForOrder(session, settings);
+  const { missing } = missingForOrder(session, settings, branches);
   if (missing.length) return missingFieldsNote(session.lang, missing);
+  const branch = chosenBranch(session, branches);
+  if (branch && !isBranchOpen(branch)) return copy.branchClosed(branchName(branch, session.lang), nextOpening(branch));
   const { subtotal } = priceCart(session.cart, catalogue);
   if (subtotal < Number(settings.minimumOrder || 0)) return copy.minimumOrder(settings.minimumOrder);
   return null;
@@ -45,10 +51,11 @@ const orderBlocker = (session, settings, catalogue) => {
  * Shows the customer exactly what will reach the kitchen — built from the real
  * cart, not the model's memory — and waits for them to confirm it.
  */
-export const reviewOrder = (session, settings, catalogue) => {
-  const blocker = orderBlocker(session, settings, catalogue);
+export const reviewOrder = (session, settings, catalogue, branches = []) => {
+  const blocker = orderBlocker(session, settings, catalogue, branches);
   if (blocker) return blocker;
-  const { orderType } = missingForOrder(session, settings);
+  const { orderType } = missingForOrder(session, settings, branches);
+  const branch = chosenBranch(session, branches);
   session.awaitingConfirmation = true;
   return t(session.lang).reviewOrder({
     cart: describeCart(session.cart, catalogue, session.lang),
@@ -57,6 +64,7 @@ export const reviewOrder = (session, settings, catalogue) => {
     deliveryFee: Number(settings.deliveryFee || 0),
     paymentMethod: session.paymentMethod,
     hasPin: Boolean(session.location),
+    branch: branch ? { name: branchName(branch, session.lang), prep: branch.prepMinutes || 15 } : null,
   });
 };
 
@@ -66,7 +74,8 @@ const confirmButtons = (lang) => [
 ];
 
 /** Everything the customer confirmed; any change after the review needs a new review. */
-const orderSnapshot = (session) => JSON.stringify([session.cart, session.customer, session.orderType, session.paymentMethod, session.location]);
+const orderSnapshot = (session) =>
+  JSON.stringify([session.cart, session.customer, session.orderType, session.paymentMethod, session.location, session.pickupLocationId]);
 
 /** Photo messages for the catalogue numbers the agent picked (max 3), captioned with name and price. */
 const photosFor = (numbers, catalogue, lang) =>
@@ -80,11 +89,12 @@ const photosFor = (numbers, catalogue, lang) =>
  * Places the order through the Mdawra API and, for online payment, sends the
  * link. Returns the text to show the customer.
  */
-export const placeOrder = async (session, settings, catalogue) => {
+export const placeOrder = async (session, settings, catalogue, branches = []) => {
   const copy = t(session.lang);
-  const blocker = orderBlocker(session, settings, catalogue);
+  const blocker = orderBlocker(session, settings, catalogue, branches);
   if (blocker) return blocker;
-  const { orderType } = missingForOrder(session, settings);
+  const { orderType } = missingForOrder(session, settings, branches);
+  const branch = chosenBranch(session, branches);
 
   const c = session.customer;
   let order;
@@ -101,6 +111,7 @@ export const placeOrder = async (session, settings, catalogue) => {
       notes: c.notes || undefined,
       deliveryLat: orderType === 'DELIVERY' && session.location ? session.location.lat : undefined,
       deliveryLng: orderType === 'DELIVERY' && session.location ? session.location.lng : undefined,
+      pickupLocationId: branch ? branch.id : undefined,
       paymentMethod: mdawraPaymentMethod(session.paymentMethod),
       channel: 'WHATSAPP',
       items: session.cart.map((line) => ({ menuItemId: line.menuItemId, quantity: line.quantity, optionIds: line.optionIds })),
@@ -132,7 +143,7 @@ export const placeOrder = async (session, settings, catalogue) => {
     paymentMethod = paymentMethod === 'ONLINE' ? 'CASH' : paymentMethod;
     reply = copy.orderPlaced(order.orderNumber, order.total, items);
   }
-  orders.track({ order, phone: session.phone, lang: session.lang, paymentMethod, paymentReference, paymentUrl });
+  orders.track({ order, phone: session.phone, lang: session.lang, paymentMethod, paymentReference, paymentUrl, pickupBranch: branch ? branchName(branch, session.lang) : null });
   await orders.notifyKitchen(orders.orderSummaryForKitchen(order, c, session.location) + (paymentMethod === 'ONLINE' ? '\n(awaiting online payment)' : ''));
   sessions.resetOrder(session);
   return reply;
@@ -201,6 +212,54 @@ const catalogueMenu = async (lang) => {
   };
 };
 
+/** Open now, today's hours and next opening, as the prompt and the branch list show them. */
+const branchStatus = (branch) => ({ open: isBranchOpen(branch), hours: todaysHours(branch), opens: nextOpening(branch) });
+
+/** The agent picked a branch by its number in PICKUP BRANCHES: the order becomes pickup from there. */
+const applyBranchChoice = (session, result, branches) => {
+  const branch = Number.isInteger(result.pickupBranch) ? branches[result.pickupBranch - 1] : null;
+  if (branch) {
+    session.pickupLocationId = branch.id;
+    session.orderType = 'PICKUP';
+  }
+  if (session.orderType === 'DELIVERY') session.pickupLocationId = null;
+};
+
+/** "Pickup branches": every active branch with open/closed, today's hours and prep time, like the website. */
+const branchesMenu = async (lang) => {
+  const copy = t(lang);
+  const [settings, branches] = await Promise.all([mdawra.getSettings(), getBranches()]);
+  if (settings.pickupEnabled !== 'true' || !branches.length) return copy.pickupUnavailable;
+  const rows = branches.slice(0, 10).map((b) => {
+    const { open, hours } = branchStatus(b);
+    return { id: `branch:${b.id}`, title: branchName(b, lang), description: copy.branchRow(open, hours, b.prepMinutes || 15) };
+  });
+  return { text: copy.pickupIntro, list: { button: copy.branchesButton, sections: [{ title: copy.branchesButton, rows }] } };
+};
+
+/** Tapping a branch: the order becomes pickup from it; the reply shows its hours and where to go next. */
+const chooseBranch = async (session, branchId) => {
+  const copy = t(session.lang);
+  const branch = (await getBranches()).find((b) => b.id === branchId);
+  if (!branch) return branchesMenu(session.lang);
+  session.orderType = 'PICKUP';
+  session.pickupLocationId = branch.id;
+  session.awaitingConfirmation = false;
+  const { open, hours, opens } = branchStatus(branch);
+  const ar = session.lang === 'ar';
+  const details = [ar ? branch.addressAr || branch.addressEn : branch.addressEn, ar ? branch.directionsAr || branch.directionsEn : branch.directionsEn, branch.phone && `☎️ ${branch.phone}`]
+    .filter(Boolean)
+    .join('\n');
+  const name = branchName(branch, session.lang);
+  sessions.remember(session, 'assistant', `Pickup from the ${branch.nameEn} branch is set.`);
+  const buttons = [
+    { id: 'menu:browse', title: copy.browseButton },
+    { id: 'menu:pickup', title: copy.changeBranchButton },
+    ...(session.cart?.length ? [{ id: 'order:review', title: copy.reviewButton }] : []),
+  ];
+  return { text: copy.branchChosen({ name, open, hours, opens, prep: branch.prepMinutes || 15, details }), buttons };
+};
+
 const ITEMS_PER_PAGE = 9;
 
 /** One category's items with name and price; a "More items…" row pages through long categories. */
@@ -244,10 +303,10 @@ const paymentLinkReply = async (session) => {
     return copy.payNow(entry.orderNumber, entry.total, entry.paymentUrl);
   }
   if (session.cart?.length) {
-    const [categories, settings] = await Promise.all([mdawra.getMenu(), mdawra.getSettings()]);
+    const [categories, settings, branches] = await Promise.all([mdawra.getMenu(), mdawra.getSettings(), getBranches()]);
     session.paymentMethod = 'ONLINE';
     session.awaitingConfirmation = false;
-    const text = reviewOrder(session, settings, buildCatalogue(categories));
+    const text = reviewOrder(session, settings, buildCatalogue(categories), branches);
     return { text, buttons: session.awaitingConfirmation ? confirmButtons(session.lang) : null };
   }
   return copy.noOrderToPay;
@@ -271,6 +330,9 @@ const handleMenu = async (session, { replyId, text }) => {
   const copy = t(session.lang);
   const typed = (text || '').trim();
   if (replyId === 'menu:browse') return catalogueMenu(session.lang);
+  if (replyId === 'menu:pickup') return branchesMenu(session.lang);
+  const branchTap = /^branch:(.+)$/.exec(replyId || '');
+  if (branchTap) return chooseBranch(session, branchTap[1]);
   if (replyId === 'menu:track') return orderStatus(session);
   if (replyId === 'menu:pay' || (!replyId && asksForLink(typed))) return paymentLinkReply(session);
   if (replyId === 'menu:complaint') {
@@ -292,7 +354,7 @@ const handleMenu = async (session, { replyId, text }) => {
 export const runAgent = async (session, text) => {
   const copy = t(session.lang);
   if (!isOpenAiConfigured()) return copy.aiUnavailable;
-  const [categories, settings] = await Promise.all([mdawra.getMenu(), mdawra.getSettings()]);
+  const [categories, settings, branches] = await Promise.all([mdawra.getMenu(), mdawra.getSettings(), getBranches()]);
   const catalogue = buildCatalogue(categories);
   const onlinePayment = payment.isOnlinePaymentEnabled();
 
@@ -300,7 +362,7 @@ export const runAgent = async (session, text) => {
   let result;
   try {
     result = await openai.completeJson({
-      system: systemPrompt({ settings, catalogue, session, restaurantName: settings.restaurantName || RESTAURANT_NAME, onlinePayment }),
+      system: systemPrompt({ settings, catalogue, session, restaurantName: settings.restaurantName || RESTAURANT_NAME, onlinePayment, branches, branchStatus }),
       messages: session.history.map((h) => ({ role: h.role, content: h.content })),
       schema: RESPONSE_SCHEMA,
       schemaName: 'sales_turn',
@@ -315,6 +377,7 @@ export const runAgent = async (session, text) => {
   const { cart, missingOptions } = applyCartChanges(session.cart, result, catalogue);
   session.cart = cart;
   applyCustomerDetails(session, result, { onlinePayment });
+  applyBranchChoice(session, result, branches);
   if (orderSnapshot(session) !== before) session.awaitingConfirmation = false;
 
   const parts = [result.reply];
@@ -368,9 +431,9 @@ export const runAgent = async (session, text) => {
       // First request shows the real order for a yes; only the confirmation afterwards places it.
       if (missingOptions.length) break;
       if (session.awaitingConfirmation) {
-        parts.push(await placeOrder(session, settings, catalogue));
+        parts.push(await placeOrder(session, settings, catalogue, branches));
       } else {
-        parts.push(reviewOrder(session, settings, catalogue));
+        parts.push(reviewOrder(session, settings, catalogue, branches));
         if (session.awaitingConfirmation) buttons = confirmButtons(session.lang);
       }
       break;
@@ -390,9 +453,16 @@ const handleOrderButton = async (session, replyId, title) => {
     sessions.remember(session, 'assistant', t(session.lang).whatToChange);
     return t(session.lang).whatToChange;
   }
+  if (replyId === 'order:review') {
+    // "Review my order" under a chosen branch: the order summary with Confirm / Change, or what is still missing.
+    const [categories, settings, branches] = await Promise.all([mdawra.getMenu(), mdawra.getSettings(), getBranches()]);
+    session.awaitingConfirmation = false;
+    const text = reviewOrder(session, settings, buildCatalogue(categories), branches);
+    return { text, buttons: session.awaitingConfirmation ? confirmButtons(session.lang) : null };
+  }
   if (replyId !== 'order:confirm' || !session.awaitingConfirmation) return null;
-  const [categories, settings] = await Promise.all([mdawra.getMenu(), mdawra.getSettings()]);
-  const reply = await placeOrder(session, settings, buildCatalogue(categories));
+  const [categories, settings, branches] = await Promise.all([mdawra.getMenu(), mdawra.getSettings(), getBranches()]);
+  const reply = await placeOrder(session, settings, buildCatalogue(categories), branches);
   sessions.remember(session, 'user', title);
   sessions.remember(session, 'assistant', reply);
   return reply;
