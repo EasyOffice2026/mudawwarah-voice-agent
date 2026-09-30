@@ -113,6 +113,32 @@ export const sendFlow = (to, { flowId, header, body, cta, screen, token, mode = 
     },
   });
 
+/** A message with one button that opens a web link (the menu page). */
+export const sendCtaUrl = (to, { body, button, url }) =>
+  send({
+    to,
+    type: 'interactive',
+    interactive: {
+      type: 'cta_url',
+      body: { text: truncate(body, 1024) },
+      action: { name: 'cta_url', parameters: { display_text: truncate(button, 20), url } },
+    },
+  });
+
+let chatLinkCache = null;
+/** wa.me link back to this business number (looked up once), for "Back to WhatsApp" buttons; null if unknown. */
+export const chatLink = async () => {
+  if (chatLinkCache !== null) return chatLinkCache || null;
+  try {
+    const response = await fetch(`${graphBase()}/${config.whatsapp.phoneNumberId}?fields=display_phone_number`, { headers: auth() });
+    const digits = String((await response.json()).display_phone_number || '').replace(/\D/g, '');
+    chatLinkCache = digits ? `https://wa.me/${digits}` : '';
+  } catch {
+    chatLinkCache = '';
+  }
+  return chatLinkCache || null;
+};
+
 /** Sends a publicly reachable image (JPEG/PNG, max 5 MB) by link. */
 export const sendImage = (to, link, caption) => send({ to, type: 'image', image: { link, caption: truncate(caption || '', 1024) } });
 

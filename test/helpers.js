@@ -12,6 +12,7 @@ process.env.ORDER_POLL_SECONDS = '0';
 // Empty rather than deleted: dotenv only fills unset variables, so deleting it let .env point the tests at the real data folder.
 // The same goes for every live setting that changes behaviour: tests switch these on themselves when they need them.
 process.env.DATA_DIR = '';
+process.env.MENU_PAGE = 'false';
 for (const key of ['WHATSAPP_CATALOG_ID', 'WHATSAPP_CATALOG_TOKEN', 'WHATSAPP_ORDER_FLOW_ID', 'WHATSAPP_ORDER_FLOW_MODE', 'WHATSAPP_BUSINESS_ACCOUNT_ID', 'WHATSAPP_APP_SECRET']) {
   process.env[key] ??= '';
 }

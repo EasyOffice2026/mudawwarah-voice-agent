@@ -9,6 +9,7 @@ import { t } from './copy.js';
 import { isCatalogEnabled, productListGroups, cartFromOrder } from './catalog.js';
 import { getBranches, isBranchOpen, todaysHours, nextOpening, branchName } from './branches.js';
 import { isOrderFlowEnabled, cartFromFlowReply, screenId } from './orderFlow.js';
+import { isMenuPageEnabled, menuPageUrl } from './menuPage.js';
 import {
   RESPONSE_SCHEMA,
   money,
@@ -198,8 +199,12 @@ const categoriesMenu = async (lang) => {
  * (split by category when there are more than 30 items); without one, the
  * category list.
  */
-const catalogueMenu = async (lang) => {
-  if (!isCatalogEnabled()) return isOrderFlowEnabled() ? orderFormMenu(lang) : categoriesMenu(lang);
+const catalogueMenu = async (lang, phone) => {
+  // Best available multi-item menu: Meta's catalogue, then our own menu page, then the Flow form, then the lists.
+  if (!isCatalogEnabled()) {
+    if (isMenuPageEnabled() && phone) return menuPageMenu(lang, phone);
+    return isOrderFlowEnabled() ? orderFormMenu(lang) : categoriesMenu(lang);
+  }
   const copy = t(lang);
   const groups = productListGroups(await mdawra.getMenu(), lang);
   if (!groups.length) return categoriesMenu(lang);
@@ -211,6 +216,12 @@ const catalogueMenu = async (lang) => {
       sections,
     })),
   };
+};
+
+/** The web menu page: an "Open menu" button with a link signed for this customer. */
+const menuPageMenu = (lang, phone) => {
+  const copy = t(lang);
+  return { cta: { body: copy.menuPageBody, button: copy.menuPageButton, url: menuPageUrl(phone) } };
 };
 
 /** The order form (WhatsApp Flow): every item with a quantity picker, sent back in one go. */
@@ -346,7 +357,7 @@ const GREETING = /^(hi+|hello+|hey+|hala|salam|good (morning|evening)|السلا
 const handleMenu = async (session, { replyId, text }) => {
   const copy = t(session.lang);
   const typed = (text || '').trim();
-  if (replyId === 'menu:browse') return catalogueMenu(session.lang);
+  if (replyId === 'menu:browse') return catalogueMenu(session.lang, session.phone);
   if (replyId === 'menu:pickup') return branchesMenu(session.lang);
   const branchTap = /^branch:(.+)$/.exec(replyId || '');
   if (branchTap) return chooseBranch(session, branchTap[1]);
@@ -363,7 +374,7 @@ const handleMenu = async (session, { replyId, text }) => {
   const category = /^cat:(.+):(\d+)$/.exec(replyId || '');
   if (category) return itemsMenu(session.lang, category[1], Number(category[2]));
   if (!replyId && MENU_WORDS.test(typed)) return mainMenu(session.lang);
-  if (!replyId && CATALOGUE_WORDS.test(typed)) return catalogueMenu(session.lang);
+  if (!replyId && CATALOGUE_WORDS.test(typed)) return catalogueMenu(session.lang, session.phone);
   return null;
 };
 
@@ -411,6 +422,7 @@ export const runAgent = async (session, text) => {
   let list = null;
   let productLists = null;
   let flow = null;
+  let cta = null;
   /** Adds a reply that may carry buttons, a list, catalogue messages or the order form alongside its text. */
   const attach = (extra) => {
     if (!extra) return;
@@ -420,6 +432,7 @@ export const runAgent = async (session, text) => {
     list = extra.list || list;
     productLists = extra.productLists || productLists;
     flow = extra.flow || flow;
+    cta = extra.cta || cta;
   };
   if (missingOptions.length) parts.push(missingOptionsNote(session.lang, missingOptions));
   switch (action) {
@@ -427,7 +440,7 @@ export const runAgent = async (session, text) => {
       list = mainMenu(session.lang).list;
       break;
     case 'browse_menu':
-      attach({ ...(await catalogueMenu(session.lang)), text: '' });
+      attach({ ...(await catalogueMenu(session.lang, session.phone)), text: '' });
       break;
     case 'payment_link':
       attach(await paymentLinkReply(session));
@@ -478,7 +491,7 @@ export const runAgent = async (session, text) => {
   // Remember what the customer actually saw, so the model does not build on a line that was replaced.
   sessions.remember(session, 'assistant', parts[0] === result.reply ? result.reply : reply);
   sessions.save(session);
-  return { text: reply, buttons, list, productLists, flow, photos: photosFor(result.photos, catalogue, session.lang) };
+  return { text: reply, buttons, list, productLists, flow, cta, photos: photosFor(result.photos, catalogue, session.lang) };
 };
 
 /** Confirm / Change buttons under the order review; confirming places the order without asking the model. */
@@ -552,7 +565,7 @@ export const handleAfterSales = async (session, { text, replyId }) => {
 };
 
 /** Entry point for one inbound WhatsApp message. */
-export const handleInbound = async ({ phone, waName, text, replyId, audioId, mimeType, location, unsupported, cartOrder, flowReply }) => {
+export const handleInbound = async ({ phone, waName, text, replyId, audioId, mimeType, location, unsupported, cartOrder, flowReply, pageCart }) => {
   const session = sessions.get(phone, waName);
   const copy = () => t(session.lang);
   let utterance = text || '';
@@ -571,14 +584,19 @@ export const handleInbound = async ({ phone, waName, text, replyId, audioId, mim
   // the agent carries on with whatever is still missing (address, payment…).
   // The order form (WhatsApp Flow) works the same way, but adds to the cart: a customer can open it more than once.
   let unavailableNote = null;
-  const picked = cartOrder || flowReply;
+  const picked = cartOrder || flowReply || pageCart;
   if (picked) {
     session.greeted = true;
     if (!session.lang) session.lang = detectLang(text, 'en');
     const categories = await mdawra.getMenu();
-    const { lines, unavailable } = cartOrder ? cartFromOrder(cartOrder, categories) : cartFromFlowReply(flowReply, categories);
+    const { lines, unavailable } = pageCart
+      ? { lines: pageCart, unavailable: [] }
+      : cartOrder
+        ? cartFromOrder(cartOrder, categories)
+        : cartFromFlowReply(flowReply, categories);
     if (!lines.length) return finish(session, cartOrder ? copy().cartUnavailable : copy().nothingPicked, false);
-    if (cartOrder) {
+    // The catalogue cart and the menu page show the whole cart, so they replace it; the Flow form adds to it.
+    if (cartOrder || pageCart) {
       session.cart = lines;
     } else {
       const merged = [...(session.cart || [])];
@@ -595,7 +613,9 @@ export const handleInbound = async ({ phone, waName, text, replyId, audioId, mim
     const summary = lines.map((l) => `${l.quantity} × ${localName(catalogue.items.find((c) => c.item.id === l.menuItemId).item, session.lang)}`).join(', ');
     utterance = cartOrder
       ? `[Sent a cart from the WhatsApp catalogue: ${summary}]${text ? ` ${text}` : ''}`
-      : `[Picked in the WhatsApp order form: ${summary}]`;
+      : pageCart
+        ? `[Sent a cart from the menu page: ${summary}]`
+        : `[Picked in the WhatsApp order form: ${summary}]`;
   }
 
   if (audioId) {
@@ -661,13 +681,15 @@ export const handleInbound = async ({ phone, waName, text, replyId, audioId, mim
 
 /** Sends a reply: photos first, then the text (with a list or buttons when given), then an optional voice note. */
 const finish = async (session, reply, voice) => {
-  const { text: rawText, buttons, list, photos, productLists, flow } = typeof reply === 'string' ? { text: reply } : reply;
+  const { text: rawText, buttons, list, photos, productLists, flow, cta } = typeof reply === 'string' ? { text: reply } : reply;
   const text = rawText || (list ? t(session.lang).menuPrompt : '');
   sessions.save(session);
   // One line per reply (kind and menu options, never the text) so what a customer was shown can be checked.
   const kind = productLists?.length
     ? `catalogue x${productLists.length}`
-    : flow
+    : cta
+      ? 'menu page link'
+      : flow
       ? 'order form'
       : list
       ? `list [${list.sections.flatMap((s) => s.rows.map((r) => r.title)).join(' | ')}]`
@@ -681,6 +703,18 @@ const finish = async (session, reply, voice) => {
     } catch (error) {
       console.error('[flow] photo failed', photo.url, error.message);
     }
+  }
+  if (cta) {
+    if (text) await wa.sendText(session.phone, text);
+    try {
+      await wa.sendCtaUrl(session.phone, cta);
+    } catch (error) {
+      // The link works just as well as plain text if the button message is refused.
+      console.error('[flow] menu page button failed, sending the link as text', error.message);
+      await wa.sendText(session.phone, `${cta.body}
+${cta.url}`);
+    }
+    return text || cta.body;
   }
   if (flow) {
     if (text) await wa.sendText(session.phone, text);
