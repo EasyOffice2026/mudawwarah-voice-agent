@@ -149,7 +149,10 @@ export const missingForOrder = (session, settings, branches = []) => {
   const pickupAllowed = settings.pickupEnabled === 'true';
   const deliveryAllowed = settings.deliveryEnabled !== 'false';
   const orderType = session.orderType || (deliveryAllowed ? 'DELIVERY' : pickupAllowed ? 'PICKUP' : 'DELIVERY');
-  if (orderType === 'DELIVERY') {
+  if (!session.orderType && pickupAllowed && deliveryAllowed) {
+    // Both are offered and the customer has not said: ask that first rather than assuming delivery.
+    missing.push('orderType');
+  } else if (orderType === 'DELIVERY') {
     for (const field of ADDRESS_FIELDS) if (!session.customer?.[field]) missing.push(field);
   }
   if (orderType === 'PICKUP' && branches.length && !branches.some((b) => b.id === session.pickupLocationId)) missing.push('pickupBranch');
@@ -220,7 +223,7 @@ COMPLETING THE ORDER
 - "payment_link" when they ask for the payment link, to pay online or by KNET/card, or just say "link"/"رابط". The system sends a link for the exact order amount; never write a link or an amount yourself.
 - "complaint" when they complain or report a problem (late, wrong or missing item, cold food, rude driver…). Put their description in "complaint"; if they have not said what went wrong yet, leave it null and the system asks. Be apologetic and brief; the system gives them a reference number.
 - With any of these actions (show_menu, browse_menu, payment_link, complaint, order_status, human) the system adds its own message right after your reply. So your reply is ONE short lead-in that fits it, e.g. "حاضر، تفضل" / "Sure, here you go" or a one-line apology. Never ask for an order number (the system finds their latest order), never ask them to describe a complaint they already described, and never say you will handle something yourself that the system passes to the team.
-- "[Sent a cart from the WhatsApp catalogue: …]" means the customer picked items in WhatsApp's own cart and pressed Place order. Those items are ALREADY in CURRENT CART: never put them in "add". Thank them in one short sentence, then ask for what is still missing; if nothing is missing, set "place_order".
+- "[Sent a cart from the WhatsApp catalogue: …]" or "[Picked in the WhatsApp order form: …]" means the customer chose items and quantities on a WhatsApp screen and sent them. Those items are ALREADY in CURRENT CART: never put them in "add". Thank them in one short sentence, then ask for what is still missing; if nothing is missing, set "place_order".
 - Always use "payment_link" when they ask for the link, even if no order is placed yet; the system knows what to do.
 ${isOpen ? '' : `- The restaurant is CLOSED now (hours: ${settings.workingHours}). Take items into the cart if they like, but explain the order can only be placed during working hours.\n`}
 RESTAURANT
@@ -229,7 +232,7 @@ ${pickupBranches}
 CURRENT CART
 ${describeCart(session.cart, catalogue)}
 
-ORDER DRAFT (${orderType}${pickup ? '' : ', delivery only'})
+ORDER DRAFT (${!session.orderType && pickup && settings.deliveryEnabled !== 'false' ? 'delivery or pickup not chosen yet — ask' : orderType === 'PICKUP' ? `PICKUP${chosenBranch ? ` from ${chosenBranch.nameEn}` : ''} — collected by the customer, NO address needed` : orderType}${pickup ? '' : ', delivery only'})
 ${known.length ? known.join('\n') : '(nothing collected yet)'}
 Still missing: ${missing.length ? missing.join(', ') : 'nothing — ready to place'}
 
@@ -306,8 +309,8 @@ export const missingOptionsNote = (lang, missingOptions) =>
     .join('\n\n');
 
 const FIELD_LABELS = {
-  en: { items: 'something to order', name: 'your name', area: 'your area', block: 'block', street: 'street', building: 'building/house number', pickupBranch: 'which branch you will pick up from', paymentMethod: 'how you want to pay' },
-  ar: { items: 'طلبك', name: 'اسمك', area: 'المنطقة', block: 'القطعة', street: 'الشارع', building: 'رقم المنزل/البناية', pickupBranch: 'أي فرع تبي تستلم منه', paymentMethod: 'طريقة الدفع' },
+  en: { items: 'something to order', orderType: 'delivery or pickup', name: 'your name', area: 'your area', block: 'block', street: 'street', building: 'building/house number', pickupBranch: 'which branch you will pick up from', paymentMethod: 'how you want to pay' },
+  ar: { items: 'طلبك', orderType: 'توصيل ولا استلام من الفرع', name: 'اسمك', area: 'المنطقة', block: 'القطعة', street: 'الشارع', building: 'رقم المنزل/البناية', pickupBranch: 'أي فرع تبي تستلم منه', paymentMethod: 'طريقة الدفع' },
 };
 
 export const missingFieldsNote = (lang, missing) => {

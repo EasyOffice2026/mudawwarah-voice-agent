@@ -12,7 +12,8 @@
     "dev": "node --watch src/index.js",
     "test": "node --test test/*.test.js",
     "lint": "node scripts/check-syntax.mjs",
-    "catalog:sync": "node scripts/sync-catalog.mjs"
+    "catalog:sync": "node scripts/sync-catalog.mjs",
+    "flow:sync": "node scripts/sync-order-flow.mjs"
   },
   "dependencies": {
     "dotenv": "^17.4.2",

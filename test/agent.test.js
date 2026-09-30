@@ -60,10 +60,13 @@ test('ONLINE payment is only accepted when a payment link provider is enabled', 
   assert.deepEqual(allowedPaymentMethods({ paymentMethods: 'CASH' }), ['CASH']);
 });
 
-test('missingForOrder lists the address only for delivery', () => {
+test('missingForOrder asks delivery or pickup first, then lists the address only for delivery', () => {
   const session = blank('1');
   session.cart = [{ menuItemId: 'item-cola', quantity: 1, optionIds: [] }];
+  assert.deepEqual(missingForOrder(session, settings).missing, ['name', 'orderType', 'paymentMethod']);
+  session.orderType = 'DELIVERY';
   assert.deepEqual(missingForOrder(session, settings).missing, ['name', 'area', 'block', 'street', 'building', 'paymentMethod']);
+  assert.deepEqual(missingForOrder({ ...session, orderType: null }, { ...settings, pickupEnabled: 'false' }).missing, ['name', 'area', 'block', 'street', 'building', 'paymentMethod']);
   session.orderType = 'PICKUP';
   session.customer.name = 'Ali';
   session.paymentMethod = 'CASH';

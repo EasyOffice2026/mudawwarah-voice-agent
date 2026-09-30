@@ -8,6 +8,7 @@ import * as payment from './payment.js';
 import { t } from './copy.js';
 import { isCatalogEnabled, productListGroups, cartFromOrder } from './catalog.js';
 import { getBranches, isBranchOpen, todaysHours, nextOpening, branchName } from './branches.js';
+import { isOrderFlowEnabled, cartFromFlowReply, screenId } from './orderFlow.js';
 import {
   RESPONSE_SCHEMA,
   money,
@@ -198,7 +199,7 @@ const categoriesMenu = async (lang) => {
  * category list.
  */
 const catalogueMenu = async (lang) => {
-  if (!isCatalogEnabled()) return categoriesMenu(lang);
+  if (!isCatalogEnabled()) return isOrderFlowEnabled() ? orderFormMenu(lang) : categoriesMenu(lang);
   const copy = t(lang);
   const groups = productListGroups(await mdawra.getMenu(), lang);
   if (!groups.length) return categoriesMenu(lang);
@@ -209,6 +210,22 @@ const catalogueMenu = async (lang) => {
       body: copy.catalogBody,
       sections,
     })),
+  };
+};
+
+/** The order form (WhatsApp Flow): every item with a quantity picker, sent back in one go. */
+const orderFormMenu = (lang) => {
+  const copy = t(lang);
+  return {
+    flow: {
+      flowId: config.whatsapp.orderFlowId,
+      mode: config.whatsapp.orderFlowMode,
+      header: copy.flowHeader,
+      body: copy.flowBody,
+      cta: copy.flowButton,
+      screen: screenId(0),
+      token: `menu-${Date.now()}`,
+    },
   };
 };
 
@@ -374,17 +391,27 @@ export const runAgent = async (session, text) => {
 
   if (result.lang === 'ar' || result.lang === 'en') session.lang = result.lang;
   const before = orderSnapshot(session);
+  const detailsBefore = JSON.stringify([session.customer, session.orderType, session.paymentMethod, session.pickupLocationId]);
   const { cart, missingOptions } = applyCartChanges(session.cart, result, catalogue);
   session.cart = cart;
   applyCustomerDetails(session, result, { onlinePayment });
   applyBranchChoice(session, result, branches);
   if (orderSnapshot(session) !== before) session.awaitingConfirmation = false;
+  // This message gave the last missing detail: show the summary with Confirm / Change rather than letting the
+  // model ask for something it no longer needs (it asked pickup customers for an address).
+  const completedDetails =
+    result.action === 'none' &&
+    session.cart.length > 0 &&
+    JSON.stringify([session.customer, session.orderType, session.paymentMethod, session.pickupLocationId]) !== detailsBefore &&
+    !missingForOrder(session, settings, branches).missing.length;
+  const action = completedDetails ? 'place_order' : result.action;
 
   const parts = [result.reply];
   let buttons = null;
   let list = null;
   let productLists = null;
-  /** Adds a reply that may carry buttons, a list or catalogue messages alongside its text. */
+  let flow = null;
+  /** Adds a reply that may carry buttons, a list, catalogue messages or the order form alongside its text. */
   const attach = (extra) => {
     if (!extra) return;
     if (typeof extra === 'string') return parts.push(extra);
@@ -392,9 +419,10 @@ export const runAgent = async (session, text) => {
     buttons = extra.buttons || buttons;
     list = extra.list || list;
     productLists = extra.productLists || productLists;
+    flow = extra.flow || flow;
   };
   if (missingOptions.length) parts.push(missingOptionsNote(session.lang, missingOptions));
-  switch (result.action) {
+  switch (action) {
     case 'show_menu':
       list = mainMenu(session.lang).list;
       break;
@@ -406,6 +434,8 @@ export const runAgent = async (session, text) => {
       break;
     case 'complaint':
       if (result.complaint?.trim()) {
+        // Already described: a fixed apology, not the model's words (it tended to ask "what exactly?" anyway).
+        parts[0] = t(session.lang).complaintSorry;
         parts.push(await logComplaint(session, result.complaint.trim()));
       } else {
         session.complaint = { stage: 'DESCRIBE' };
@@ -425,11 +455,15 @@ export const runAgent = async (session, text) => {
       break;
     case 'human':
       await orders.notifyKitchen(t('en').kitchenHuman(session.phone, text));
+      parts[0] = null;
       parts.push(t(session.lang).humanHandoff);
       break;
     case 'place_order':
       // First request shows the real order for a yes; only the confirmation afterwards places it.
       if (missingOptions.length) break;
+      // Only the system speaks here: the model's line ("placing it now!", "what is your address?") could
+      // contradict the real outcome — a summary, a missing detail, a closed branch or the minimum order.
+      parts[0] = null;
       if (session.awaitingConfirmation) {
         parts.push(await placeOrder(session, settings, catalogue, branches));
       } else {
@@ -440,9 +474,11 @@ export const runAgent = async (session, text) => {
     default:
       break;
   }
-  sessions.remember(session, 'assistant', result.reply);
+  const reply = parts.filter(Boolean).join('\n\n');
+  // Remember what the customer actually saw, so the model does not build on a line that was replaced.
+  sessions.remember(session, 'assistant', parts[0] === result.reply ? result.reply : reply);
   sessions.save(session);
-  return { text: parts.filter(Boolean).join('\n\n'), buttons, list, productLists, photos: photosFor(result.photos, catalogue, session.lang) };
+  return { text: reply, buttons, list, productLists, flow, photos: photosFor(result.photos, catalogue, session.lang) };
 };
 
 /** Confirm / Change buttons under the order review; confirming places the order without asking the model. */
@@ -460,7 +496,14 @@ const handleOrderButton = async (session, replyId, title) => {
     const text = reviewOrder(session, settings, buildCatalogue(categories), branches);
     return { text, buttons: session.awaitingConfirmation ? confirmButtons(session.lang) : null };
   }
-  if (replyId !== 'order:confirm' || !session.awaitingConfirmation) return null;
+  if (replyId !== 'order:confirm') return null;
+  if (!session.awaitingConfirmation) {
+    // An old Confirm button, or the order changed since: show where the order stands instead of guessing.
+    if (!session.cart?.length) return null;
+    const [categories, settings, branches] = await Promise.all([mdawra.getMenu(), mdawra.getSettings(), getBranches()]);
+    const text = reviewOrder(session, settings, buildCatalogue(categories), branches);
+    return { text, buttons: session.awaitingConfirmation ? confirmButtons(session.lang) : null };
+  }
   const [categories, settings, branches] = await Promise.all([mdawra.getMenu(), mdawra.getSettings(), getBranches()]);
   const reply = await placeOrder(session, settings, buildCatalogue(categories), branches);
   sessions.remember(session, 'user', title);
@@ -509,7 +552,7 @@ export const handleAfterSales = async (session, { text, replyId }) => {
 };
 
 /** Entry point for one inbound WhatsApp message. */
-export const handleInbound = async ({ phone, waName, text, replyId, audioId, mimeType, location, unsupported, cartOrder }) => {
+export const handleInbound = async ({ phone, waName, text, replyId, audioId, mimeType, location, unsupported, cartOrder, flowReply }) => {
   const session = sessions.get(phone, waName);
   const copy = () => t(session.lang);
   let utterance = text || '';
@@ -526,19 +569,33 @@ export const handleInbound = async ({ phone, waName, text, replyId, audioId, mim
 
   // "Place order" from the WhatsApp cart: the cart becomes the order draft and
   // the agent carries on with whatever is still missing (address, payment…).
+  // The order form (WhatsApp Flow) works the same way, but adds to the cart: a customer can open it more than once.
   let unavailableNote = null;
-  if (cartOrder) {
+  const picked = cartOrder || flowReply;
+  if (picked) {
     session.greeted = true;
     if (!session.lang) session.lang = detectLang(text, 'en');
     const categories = await mdawra.getMenu();
-    const { lines, unavailable } = cartFromOrder(cartOrder, categories);
-    if (!lines.length) return finish(session, copy().cartUnavailable, false);
-    session.cart = lines;
+    const { lines, unavailable } = cartOrder ? cartFromOrder(cartOrder, categories) : cartFromFlowReply(flowReply, categories);
+    if (!lines.length) return finish(session, cartOrder ? copy().cartUnavailable : copy().nothingPicked, false);
+    if (cartOrder) {
+      session.cart = lines;
+    } else {
+      const merged = [...(session.cart || [])];
+      for (const line of lines) {
+        const existing = merged.find((l) => l.menuItemId === line.menuItemId && !(l.optionIds || []).length);
+        if (existing) existing.quantity = line.quantity;
+        else merged.push(line);
+      }
+      session.cart = merged;
+    }
     session.awaitingConfirmation = false;
     if (unavailable.length) unavailableNote = copy().someUnavailable;
     const catalogue = buildCatalogue(categories);
     const summary = lines.map((l) => `${l.quantity} × ${localName(catalogue.items.find((c) => c.item.id === l.menuItemId).item, session.lang)}`).join(', ');
-    utterance = `[Sent a cart from the WhatsApp catalogue: ${summary}]${text ? ` ${text}` : ''}`;
+    utterance = cartOrder
+      ? `[Sent a cart from the WhatsApp catalogue: ${summary}]${text ? ` ${text}` : ''}`
+      : `[Picked in the WhatsApp order form: ${summary}]`;
   }
 
   if (audioId) {
@@ -579,7 +636,7 @@ export const handleInbound = async ({ phone, waName, text, replyId, audioId, mim
   const firstContact = !session.greeted && !session.history.length;
   session.greeted = true;
   const greeting = GREETING.test(utterance.trim());
-  if (!replyId && !cartOrder && (greeting || (firstContact && !utterance.trim()))) {
+  if (!replyId && !picked && (greeting || (firstContact && !utterance.trim()))) {
     if (greeting) session.lang = detectLang(utterance, session.lang);
     return finish(session, mainMenu(session.lang, copy().welcome), false);
   }
@@ -587,7 +644,7 @@ export const handleInbound = async ({ phone, waName, text, replyId, audioId, mim
   const afterSales = await handleAfterSales(session, { text: utterance, replyId });
   if (afterSales) return finish(session, afterSales, fromVoice);
 
-  if (session.complaint?.stage === 'DESCRIBE' && utterance.trim() && !cartOrder) {
+  if (session.complaint?.stage === 'DESCRIBE' && utterance.trim() && !picked) {
     session.complaint = null;
     return finish(session, await logComplaint(session, utterance.trim()), fromVoice);
   }
@@ -604,14 +661,38 @@ export const handleInbound = async ({ phone, waName, text, replyId, audioId, mim
 
 /** Sends a reply: photos first, then the text (with a list or buttons when given), then an optional voice note. */
 const finish = async (session, reply, voice) => {
-  const { text: rawText, buttons, list, photos, productLists } = typeof reply === 'string' ? { text: reply } : reply;
+  const { text: rawText, buttons, list, photos, productLists, flow } = typeof reply === 'string' ? { text: reply } : reply;
   const text = rawText || (list ? t(session.lang).menuPrompt : '');
   sessions.save(session);
+  // One line per reply (kind and menu options, never the text) so what a customer was shown can be checked.
+  const kind = productLists?.length
+    ? `catalogue x${productLists.length}`
+    : flow
+      ? 'order form'
+      : list
+      ? `list [${list.sections.flatMap((s) => s.rows.map((r) => r.title)).join(' | ')}]`
+      : buttons?.length
+        ? `buttons [${buttons.map((b) => b.title).join(' | ')}]`
+        : 'text';
+  console.log(`[reply] ${new Date().toISOString()} …${String(session.phone).slice(-4)} ${photos?.length ? `${photos.length} photo(s) + ` : ''}${kind}`);
   for (const photo of photos || []) {
     try {
       await wa.sendImage(session.phone, photo.url, photo.caption);
     } catch (error) {
       console.error('[flow] photo failed', photo.url, error.message);
+    }
+  }
+  if (flow) {
+    if (text) await wa.sendText(session.phone, text);
+    try {
+      await wa.sendFlow(session.phone, flow);
+      return text || flow.body;
+    } catch (error) {
+      // e.g. the form was deprecated or not published: fall back to the category list.
+      console.error('[flow] order form failed, sending the category list instead', error.message);
+      const fallback = await categoriesMenu(session.lang);
+      await wa.sendList(session.phone, fallback.text, fallback.list.button, fallback.list.sections);
+      return fallback.text;
     }
   }
   if (productLists?.length) {
