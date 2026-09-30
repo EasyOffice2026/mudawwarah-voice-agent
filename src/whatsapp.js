@@ -42,6 +42,31 @@ export const sendButtons = (to, text, buttons) =>
 
 export const sendAudio = (to, mediaId) => send({ to, type: 'audio', audio: { id: mediaId } });
 
+/**
+ * A tappable list menu: one button that opens up to 10 rows in total across its
+ * sections. WhatsApp caps titles at 24 characters and descriptions at 72.
+ */
+export const sendList = (to, text, buttonText, sections) =>
+  send({
+    to,
+    type: 'interactive',
+    interactive: {
+      type: 'list',
+      body: { text: truncate(text, 1024) },
+      action: {
+        button: truncate(buttonText, 20),
+        sections: sections.map((section) => ({
+          title: truncate(section.title, 24),
+          rows: section.rows.map((row) => ({
+            id: truncate(row.id, 200),
+            title: truncate(row.title, 24),
+            ...(row.description ? { description: truncate(row.description, 72) } : {}),
+          })),
+        })),
+      },
+    },
+  });
+
 /** Sends a publicly reachable image (JPEG/PNG, max 5 MB) by link. */
 export const sendImage = (to, link, caption) => send({ to, type: 'image', image: { link, caption: truncate(caption || '', 1024) } });
 

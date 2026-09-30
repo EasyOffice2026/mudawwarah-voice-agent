@@ -17,8 +17,10 @@ import { t } from './copy.js';
 
 const FILE = config.dataDir ? path.join(config.dataDir, 'orders.json') : null;
 const FEEDBACK_FILE = config.dataDir ? path.join(config.dataDir, 'feedback.json') : null;
+const COMPLAINTS_FILE = config.dataDir ? path.join(config.dataDir, 'complaints.json') : null;
 const tracked = new Map();
 const feedback = [];
+const complaints = [];
 
 const readJson = (file, fallback) => {
   if (!file || !fs.existsSync(file)) return fallback;
@@ -41,10 +43,11 @@ const writeJson = (file, value) => {
 
 for (const [id, order] of Object.entries(readJson(FILE, {}))) tracked.set(id, order);
 feedback.push(...readJson(FEEDBACK_FILE, []));
+complaints.push(...readJson(COMPLAINTS_FILE, []));
 
 const persist = () => writeJson(FILE, Object.fromEntries(tracked));
 
-export const track = ({ order, phone, lang, paymentMethod, paymentReference = null }) => {
+export const track = ({ order, phone, lang, paymentMethod, paymentReference = null, paymentUrl = null }) => {
   const entry = {
     id: order.id,
     orderNumber: order.orderNumber,
@@ -54,6 +57,7 @@ export const track = ({ order, phone, lang, paymentMethod, paymentReference = nu
     total: Number(order.total),
     paymentMethod,
     paymentReference,
+    paymentUrl,
     paid: paymentMethod !== 'ONLINE',
     status: order.status || 'PENDING',
     receiptAsked: false,
@@ -74,6 +78,14 @@ export const untrack = (id) => {
 export const clearAll = () => {
   tracked.clear();
   feedback.length = 0;
+  complaints.length = 0;
+};
+
+/** Saves changes made to a tracked entry. */
+export const update = (entry) => {
+  tracked.set(entry.id, entry);
+  persist();
+  return entry;
 };
 
 export const notifyKitchen = async (text) => {
@@ -127,7 +139,8 @@ export const announceStatus = async (entry, status) => {
   }
 };
 
-const isAbandoned = (entry) => !entry.paid && Date.now() - entry.createdAt > config.kitchen.paymentTimeoutMinutes * 60 * 1000;
+// Timed from when the link was last sent, so a cash order switched to online later is not dropped at once.
+const isAbandoned = (entry) => !entry.paid && Date.now() - (entry.paymentRequestedAt || entry.createdAt) > config.kitchen.paymentTimeoutMinutes * 60 * 1000;
 
 /** One polling pass; exported so tests can drive it without timers. */
 export const pollOnce = async () => {
@@ -178,3 +191,21 @@ export const recordFeedback = ({ entry, rating, comment }) => {
 };
 
 export const listFeedback = () => [...feedback].reverse();
+
+/** Logs a customer complaint for the team; returns the record with its reference (C-0001, C-0002, …). */
+export const recordComplaint = ({ phone, name, orderNumber, text }) => {
+  const record = {
+    ref: `C-${String(complaints.length + 1).padStart(4, '0')}`,
+    phone,
+    name: name || null,
+    orderNumber: orderNumber || null,
+    text,
+    status: 'OPEN',
+    createdAt: new Date().toISOString(),
+  };
+  complaints.push(record);
+  writeJson(COMPLAINTS_FILE, complaints);
+  return record;
+};
+
+export const listComplaints = () => [...complaints].reverse();

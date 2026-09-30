@@ -111,28 +111,41 @@ export const placeOrder = async (session, settings, catalogue) => {
 
   session.lastOrderId = order.id;
   session.lastOrderNumber = order.orderNumber;
+  const items = orderItemsText(order, session.lang);
   let paymentMethod = session.paymentMethod;
   let paymentReference = null;
+  let paymentUrl = null;
   let reply;
   if (paymentMethod === 'ONLINE' && payment.isOnlinePaymentEnabled()) {
     try {
       const link = await payment.createPaymentLink({ order, phone: session.phone, lang: session.lang });
       paymentReference = link.reference;
-      reply = copy.payNow(order.orderNumber, order.total, link.url);
+      paymentUrl = link.url;
+      reply = copy.payNow(order.orderNumber, order.total, link.url, items);
     } catch (error) {
       console.error('[flow] payment link failed', error.message);
       paymentMethod = 'CASH';
-      reply = `${copy.orderPlaced(order.orderNumber, order.total)}\n${copy.paymentLinkUnavailable}`;
+      reply = `${copy.orderPlaced(order.orderNumber, order.total, items)}\n${copy.paymentLinkUnavailable}`;
     }
   } else {
     paymentMethod = paymentMethod === 'ONLINE' ? 'CASH' : paymentMethod;
-    reply = copy.orderPlaced(order.orderNumber, order.total);
+    reply = copy.orderPlaced(order.orderNumber, order.total, items);
   }
-  orders.track({ order, phone: session.phone, lang: session.lang, paymentMethod, paymentReference });
+  orders.track({ order, phone: session.phone, lang: session.lang, paymentMethod, paymentReference, paymentUrl });
   await orders.notifyKitchen(orders.orderSummaryForKitchen(order, c, session.location) + (paymentMethod === 'ONLINE' ? '\n(awaiting online payment)' : ''));
   sessions.resetOrder(session);
   return reply;
 };
+
+/** The order's lines as the kitchen recorded them, so the customer sees exactly what was ordered. */
+const orderItemsText = (order, lang) =>
+  (order.items || [])
+    .map((i) => {
+      const name = (o) => (lang === 'ar' && o.nameAr ? o.nameAr : o.nameEn);
+      const extras = (i.customizations || []).map(name).filter(Boolean);
+      return `${i.quantity} × ${name(i)}${extras.length ? ` (${extras.join(', ')})` : ''}`;
+    })
+    .join('\n');
 
 const orderStatus = async (session) => {
   const copy = t(session.lang);
@@ -143,6 +156,115 @@ const orderStatus = async (session) => {
   } catch {
     return copy.noOrders;
   }
+};
+
+/** Categories and items a customer can order right now, in menu order. */
+const orderableCategories = (categories) =>
+  (categories || [])
+    .map((category) => ({ ...category, items: (category.items || []).filter((item) => item.isAvailable !== false && !item.isOutOfStock) }))
+    .filter((category) => category.items.length);
+
+const localName = (o, lang) => (lang === 'ar' && o.nameAr ? o.nameAr : o.nameEn);
+
+/** The main menu: greeting or prompt plus a tappable list of what the bot can do. */
+const mainMenu = (lang, intro) => {
+  const copy = t(lang);
+  return { text: intro || copy.menuPrompt, list: { button: copy.menuButton, sections: [{ title: copy.menuTitle, rows: copy.menuRows }] } };
+};
+
+/** The catalogue's first level: one row per category (WhatsApp shows at most 10 rows). */
+const categoriesMenu = async (lang) => {
+  const copy = t(lang);
+  const categories = orderableCategories(await mdawra.getMenu()).slice(0, 10);
+  const rows = categories.map((c) => ({ id: `cat:${c.id}:0`, title: localName(c, lang), description: `${c.items.length} ${lang === 'ar' ? 'صنف' : 'items'}` }));
+  return { text: copy.browseIntro, list: { button: copy.categoriesButton, sections: [{ title: copy.menuTitle, rows }] } };
+};
+
+const ITEMS_PER_PAGE = 9;
+
+/** One category's items with name and price; a "More items…" row pages through long categories. */
+const itemsMenu = async (lang, categoryId, page) => {
+  const copy = t(lang);
+  const category = orderableCategories(await mdawra.getMenu()).find((c) => c.id === categoryId);
+  if (!category) return categoriesMenu(lang);
+  const start = page * ITEMS_PER_PAGE;
+  const rows = category.items.slice(start, start + ITEMS_PER_PAGE).map((item) => ({
+    id: `item:${item.id}`,
+    title: localName(item, lang),
+    description: `${money(item.price)}${localName(item, lang).length > 24 ? ` · ${localName(item, lang)}` : ''}`,
+  }));
+  if (category.items.length > start + ITEMS_PER_PAGE) rows.push({ id: `cat:${category.id}:${page + 1}`, title: copy.moreItems });
+  return { text: copy.itemsIntro(localName(category, lang)), list: { button: copy.itemsButton, sections: [{ title: localName(category, lang), rows }] } };
+};
+
+/**
+ * "link": a payment link for the exact amount of the customer's latest open
+ * order. A cash order is switched to online payment; an order still being put
+ * together is reviewed again with online payment so the link follows the yes.
+ */
+const paymentLinkReply = async (session) => {
+  const copy = t(session.lang);
+  if (!payment.isOnlinePaymentEnabled()) return copy.onlinePaymentOff;
+  const entry = orders
+    .forPhone(session.phone)
+    .find((o) => !['DELIVERED', 'CANCELLED'].includes(o.status) && (o.paymentMethod !== 'ONLINE' || !o.paid));
+  if (entry) {
+    if (!entry.paymentUrl || entry.paymentMethod !== 'ONLINE') {
+      const link = await payment.createPaymentLink({
+        order: { id: entry.id, orderNumber: entry.orderNumber, total: entry.total, customerName: session.customer?.name || session.waName || 'Customer' },
+        phone: session.phone,
+        lang: session.lang,
+      });
+      const switched = entry.paymentMethod !== 'ONLINE';
+      Object.assign(entry, { paymentMethod: 'ONLINE', paid: false, paymentUrl: link.url, paymentReference: link.reference, paymentRequestedAt: Date.now() });
+      orders.update(entry);
+      if (switched) await orders.notifyKitchen(t('en').kitchenPayOnline(entry.orderNumber));
+    }
+    return copy.payNow(entry.orderNumber, entry.total, entry.paymentUrl);
+  }
+  if (session.cart?.length) {
+    const [categories, settings] = await Promise.all([mdawra.getMenu(), mdawra.getSettings()]);
+    session.paymentMethod = 'ONLINE';
+    session.awaitingConfirmation = false;
+    const text = reviewOrder(session, settings, buildCatalogue(categories));
+    return { text, buttons: session.awaitingConfirmation ? confirmButtons(session.lang) : null };
+  }
+  return copy.noOrderToPay;
+};
+
+/** Logs the complaint, alerts the team and gives the customer a reference. */
+const logComplaint = async (session, text) => {
+  const record = orders.recordComplaint({ phone: session.phone, name: session.customer?.name || session.waName, orderNumber: session.lastOrderNumber, text });
+  await orders.notifyKitchen(t('en').kitchenComplaint(record.ref, session.phone, record.orderNumber, text));
+  return t(session.lang).complaintLogged(record.ref);
+};
+
+const MENU_WORDS = /^(main menu|options|help|القائمة|قائمة|القائمة الرئيسية|مساعدة)[\s!.؟?]*$/i;
+const CATALOGUE_WORDS = /^(menu|the menu|catalog(ue)?|المنيو|منيو)[\s!.؟?]*$/i;
+// A short message that mentions the link ("link", "send link", "أبي الرابط", "ابي رابط الدفع لو سمحت").
+const asksForLink = (typed) => typed.split(/\s+/).length <= 6 && /(\blink\b|رابط|لينك|الرابط)/i.test(typed);
+const GREETING = /^(hi+|hello+|hey+|hala|salam|good (morning|evening)|السلام عليكم|سلام|هلا|هلا والله|هلا وغلا|مرحبا|مرحبًا|أهلا|اهلا|مساء الخير|صباح الخير)[\s!.,،؟?]*$/i;
+
+/** Taps on the main menu and the catalogue lists, plus the "menu" and "link" keywords. */
+const handleMenu = async (session, { replyId, text }) => {
+  const copy = t(session.lang);
+  const typed = (text || '').trim();
+  if (replyId === 'menu:browse') return categoriesMenu(session.lang);
+  if (replyId === 'menu:track') return orderStatus(session);
+  if (replyId === 'menu:pay' || (!replyId && asksForLink(typed))) return paymentLinkReply(session);
+  if (replyId === 'menu:complaint') {
+    session.complaint = { stage: 'DESCRIBE' };
+    return copy.complaintAsk;
+  }
+  if (replyId === 'menu:team') {
+    await orders.notifyKitchen(t('en').kitchenHuman(session.phone, 'Tapped "Talk to our team"'));
+    return copy.humanHandoff;
+  }
+  const category = /^cat:(.+):(\d+)$/.exec(replyId || '');
+  if (category) return itemsMenu(session.lang, category[1], Number(category[2]));
+  if (!replyId && MENU_WORDS.test(typed)) return mainMenu(session.lang);
+  if (!replyId && CATALOGUE_WORDS.test(typed)) return categoriesMenu(session.lang);
+  return null;
 };
 
 /** Runs the AI sales agent for one customer utterance and applies its decisions. */
@@ -176,8 +298,34 @@ export const runAgent = async (session, text) => {
 
   const parts = [result.reply];
   let buttons = null;
+  let list = null;
+  /** Adds a reply that may carry buttons or a list alongside its text. */
+  const attach = (extra) => {
+    if (!extra) return;
+    if (typeof extra === 'string') return parts.push(extra);
+    parts.push(extra.text);
+    buttons = extra.buttons || buttons;
+    list = extra.list || list;
+  };
   if (missingOptions.length) parts.push(missingOptionsNote(session.lang, missingOptions));
   switch (result.action) {
+    case 'show_menu':
+      list = mainMenu(session.lang).list;
+      break;
+    case 'browse_menu':
+      list = (await categoriesMenu(session.lang)).list;
+      break;
+    case 'payment_link':
+      attach(await paymentLinkReply(session));
+      break;
+    case 'complaint':
+      if (result.complaint?.trim()) {
+        parts.push(await logComplaint(session, result.complaint.trim()));
+      } else {
+        session.complaint = { stage: 'DESCRIBE' };
+        parts.push(t(session.lang).complaintAsk);
+      }
+      break;
     case 'show_cart':
       parts.push(describeCart(session.cart, catalogue, session.lang));
       break;
@@ -208,7 +356,7 @@ export const runAgent = async (session, text) => {
   }
   sessions.remember(session, 'assistant', result.reply);
   sessions.save(session);
-  return { text: parts.filter(Boolean).join('\n\n'), buttons, photos: photosFor(result.photos, catalogue, session.lang) };
+  return { text: parts.filter(Boolean).join('\n\n'), buttons, list, photos: photosFor(result.photos, catalogue, session.lang) };
 };
 
 /** Confirm / Change buttons under the order review; confirming places the order without asking the model. */
@@ -301,17 +449,47 @@ export const handleInbound = async ({ phone, waName, text, replyId, audioId, mim
 
   if (!session.lang) session.lang = detectLang(utterance, 'en');
 
+  const menuReply = await handleMenu(session, { replyId, text: utterance });
+  if (menuReply) return finish(session, menuReply, false);
+
+  // Tapping an item in the catalogue list is the same as asking for it: the agent adds it or asks for its options.
+  let tapPhotos = [];
+  const itemTap = /^item:(.+)$/.exec(replyId || '');
+  if (itemTap) {
+    const catalogue = buildCatalogue(await mdawra.getMenu());
+    const entry = catalogue.items.find((c) => c.item.id === itemTap[1]);
+    if (entry) {
+      utterance = copy().wantItem(localName(entry.item, session.lang));
+      tapPhotos = photosFor([entry.no], catalogue, session.lang);
+    }
+  }
+
+  // First contact: greet and show the main menu. A first message that already asks for something goes to the agent.
+  const firstContact = !session.greeted && !session.history.length;
+  session.greeted = true;
+  if (firstContact && !replyId && (!utterance.trim() || GREETING.test(utterance.trim()))) return finish(session, mainMenu(session.lang, copy().welcome), false);
+
   const afterSales = await handleAfterSales(session, { text: utterance, replyId });
   if (afterSales) return finish(session, afterSales, fromVoice);
 
+  if (session.complaint?.stage === 'DESCRIBE' && utterance.trim()) {
+    session.complaint = null;
+    return finish(session, await logComplaint(session, utterance.trim()), fromVoice);
+  }
+
   if (!utterance.trim()) return finish(session, copy().unclearVoice, false);
   const reply = await runAgent(session, utterance);
+  if (tapPhotos.length && typeof reply === 'object') {
+    const seen = new Set(tapPhotos.map((p) => p.url));
+    reply.photos = [...tapPhotos, ...(reply.photos || []).filter((p) => !seen.has(p.url))].slice(0, 3);
+  }
   return finish(session, reply, fromVoice);
 };
 
-/** Sends a reply: photos first, then the text (with buttons when given), then an optional voice note. */
+/** Sends a reply: photos first, then the text (with a list or buttons when given), then an optional voice note. */
 const finish = async (session, reply, voice) => {
-  const { text, buttons, photos } = typeof reply === 'string' ? { text: reply } : reply;
+  const { text: rawText, buttons, list, photos } = typeof reply === 'string' ? { text: reply } : reply;
+  const text = rawText || (list ? t(session.lang).menuPrompt : '');
   sessions.save(session);
   for (const photo of photos || []) {
     try {
@@ -320,7 +498,14 @@ const finish = async (session, reply, voice) => {
       console.error('[flow] photo failed', photo.url, error.message);
     }
   }
-  if (buttons?.length && text.length <= 1024) {
+  if (list) {
+    if (text.length <= 1024) {
+      await wa.sendList(session.phone, text, list.button, list.sections);
+    } else {
+      await wa.sendText(session.phone, text);
+      await wa.sendList(session.phone, t(session.lang).menuPrompt, list.button, list.sections);
+    }
+  } else if (buttons?.length && text.length <= 1024) {
     await wa.sendButtons(session.phone, text, buttons);
   } else {
     await wa.sendText(session.phone, text);

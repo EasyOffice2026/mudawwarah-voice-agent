@@ -21,6 +21,7 @@ const turn = (lang, reply, extra = {}) => ({
   orderType: null,
   paymentMethod: null,
   action: 'none',
+  complaint: null,
   ...extra,
 });
 
@@ -131,7 +132,7 @@ test('full order: details collected, order placed via Mdawra API, payment link s
   await handleInbound({ phone: PHONE, text: 'two chicken shawarma with garlic' });
   await handleInbound({ phone: PHONE, text: 'delivery' });
   await handleInbound({ phone: PHONE, text: 'Sara, Salmiya block 4 street 5 building 12' });
-  await handleInbound({ phone: PHONE, text: 'pay by link please' });
+  await handleInbound({ phone: PHONE, text: 'I will pay online by KNET' });
 
   // First place_order only shows the real order and waits for a yes.
   assert.equal(createdOrders.length, 0);
@@ -306,6 +307,142 @@ test('WhatsApp message types are turned into agent input', () => {
   });
   assert.deepEqual(wa.extractInput({ type: 'image', image: { id: 'm1', caption: 'I want this one' } }), { text: 'I want this one' });
   assert.deepEqual(wa.extractInput({ type: 'sticker', sticker: { id: 'm2' } }), { text: '', unsupported: true });
+});
+
+const listOf = (message) => message.body.interactive.action.sections.flatMap((s) => s.rows);
+
+test('a first greeting gets the welcome and the main menu list, without calling the model', async () => {
+  await handleInbound({ phone: PHONE, text: 'السلام عليكم' });
+  const [welcome] = sentMessages(calls).filter((m) => m.to === PHONE);
+  assert.equal(welcome.body.interactive.type, 'list');
+  assert.match(welcome.text, /هلا والله ومرحبا فيك في مدورة/);
+  assert.deepEqual(listOf(welcome).map((r) => r.id), ['menu:browse', 'menu:track', 'menu:pay', 'menu:complaint', 'menu:team']);
+  assert.equal(prompts.length, 0);
+
+  // A second "hi" in the same conversation is a normal message for the agent.
+  modelTurns.push(turn('ar', 'هلا فيك! شنو تحب تطلب؟'));
+  await handleInbound({ phone: PHONE, text: 'هلا' });
+  assert.equal(prompts.length, 1);
+});
+
+test('the catalogue: categories list → items with prices → tapping an item asks the agent for it with its photo', async () => {
+  sessions.get(PHONE).greeted = true;
+  await handleInbound({ phone: PHONE, replyId: 'menu:browse', text: 'Browse the menu' });
+  const categories = sentMessages(calls).at(-1);
+  assert.deepEqual(listOf(categories).map((r) => [r.id, r.title]), [['cat:cat-1:0', 'Mains'], ['cat:cat-2:0', 'Drinks']]);
+
+  await handleInbound({ phone: PHONE, replyId: 'cat:cat-1:0', text: 'Mains' });
+  const items = sentMessages(calls).at(-1);
+  assert.match(items.text, /Mains — tap an item/);
+  assert.deepEqual(listOf(items).map((r) => [r.id, r.title, r.description]), [['item:item-shawarma', 'Chicken Shawarma', '1.500 KWD']]);
+
+  modelTurns.push(turn('en', 'Great choice! Garlic or tahini?'));
+  await handleInbound({ phone: PHONE, replyId: 'item:item-shawarma', text: 'Chicken Shawarma' });
+  assert.equal(prompts[0].messages.at(-1).content, "I'd like Chicken Shawarma");
+  const out = sentMessages(calls).slice(-2);
+  assert.deepEqual(out.map((m) => m.type), ['image', 'text']);
+  assert.equal(out[0].body.image.caption, 'Chicken Shawarma — 1.500 KWD');
+});
+
+test('long categories are paged with a "More items" row', async () => {
+  const many = Array.from({ length: 12 }, (_, i) => ({ id: `i${i + 1}`, nameEn: `Item ${i + 1}`, price: '1', options: [] }));
+  calls = mockFetch({ 'GET /categories': () => ({ json: [{ id: 'big', nameEn: 'Big', items: many }] }), 'POST /12345/messages': () => ({ json: {} }) });
+  sessions.get(PHONE).greeted = true;
+  await handleInbound({ phone: PHONE, replyId: 'cat:big:0', text: 'Big' });
+  let rows = listOf(sentMessages(calls).at(-1));
+  assert.equal(rows.length, 10);
+  assert.deepEqual(rows.at(-1), { id: 'cat:big:1', title: 'More items…' });
+  await handleInbound({ phone: PHONE, replyId: 'cat:big:1', text: 'More items…' });
+  rows = listOf(sentMessages(calls).at(-1));
+  assert.deepEqual(rows.map((r) => r.id), ['item:i10', 'item:i11', 'item:i12']);
+});
+
+test('"link" sends a payment link for the exact amount of the open order, switching a cash order to online', async () => {
+  sessions.get(PHONE).greeted = true;
+  await handleInbound({ phone: PHONE, text: 'link' });
+  assert.match(sentTexts(calls).at(-1).text, /no order waiting for payment/);
+
+  orders.track({ order: { id: 'order-1', orderNumber: 'MD-1001', status: 'CONFIRMED', total: '7.250', orderType: 'DELIVERY' }, phone: PHONE, lang: 'en', paymentMethod: 'CASH' });
+  await handleInbound({ phone: PHONE, text: 'Link' });
+  const reply = sentTexts(calls).filter((m) => m.to === PHONE).at(-1).text;
+  assert.match(reply, /Order MD-1001 is reserved — total 7\.250 KWD/);
+  assert.match(reply, /https:\/\/agent\.test\/payments\/mock\/pay\?ref=order-1/);
+  const entry = orders.get('order-1');
+  assert.equal(entry.paymentMethod, 'ONLINE');
+  assert.equal(entry.paid, false);
+  assert.match(sentTexts(calls).filter((m) => m.to === KITCHEN).at(-1).text, /MD-1001: customer switched to online payment/);
+
+  // Asking again re-sends the same link rather than creating a second invoice.
+  await handleInbound({ phone: PHONE, text: 'رابط' });
+  assert.match(sentTexts(calls).at(-1).text, /ref=order-1/);
+  assert.equal(sentTexts(calls).filter((m) => m.to === KITCHEN).length, 1);
+});
+
+test('"link" while an order is still being put together reviews it with online payment first', async () => {
+  Object.assign(sessions.get(PHONE), {
+    greeted: true,
+    lang: 'en',
+    cart: [{ menuItemId: 'item-shawarma', quantity: 2, optionIds: ['opt-garlic'] }],
+    customer: { name: 'Sara', area: 'Salmiya', block: '4', street: '5', building: '12', notes: null },
+    orderType: 'DELIVERY',
+    paymentMethod: 'CASH',
+  });
+  await handleInbound({ phone: PHONE, replyId: 'menu:pay', text: 'Payment link' });
+  const review = sentMessages(calls).at(-1);
+  assert.match(review.text, /Payment: payment link \(KNET or card\)/);
+  assert.equal(review.body.interactive.type, 'button');
+  await handleInbound({ phone: PHONE, replyId: 'order:confirm', text: 'Confirm order' });
+  assert.equal(createdOrders[0].paymentMethod, 'KNET');
+  assert.match(sentTexts(calls).at(-1).text, /Order MD-1001 is reserved — total 4\.000 KWD\.\n2 × Chicken Shawarma \(Garlic\)\nPay securely/);
+});
+
+test('complaint from the menu: the next message (text or voice) is logged with a reference and the team is alerted', async () => {
+  Object.assign(sessions.get(PHONE), { greeted: true, lang: 'ar', lastOrderNumber: 'MD-1001' });
+  await handleInbound({ phone: PHONE, replyId: 'menu:complaint', text: 'شكوى / مساعدة' });
+  assert.match(sentTexts(calls).at(-1).text, /وصف لي المشكلة/);
+
+  await handleInbound({ phone: PHONE, audioId: 'media-1', mimeType: 'audio/ogg' });
+  assert.match(sentTexts(calls).filter((m) => m.to === PHONE).at(-1).text, /تم تسجيل شكواك برقم C-0001/);
+  assert.match(sentTexts(calls).filter((m) => m.to === KITCHEN).at(-1).text, /Complaint C-0001 from 96550001111 \(order MD-1001\): "أبي شاورما دجاج ثنتين بثوم"/);
+  assert.deepEqual(orders.listComplaints().map((c) => [c.ref, c.orderNumber, c.status]), [['C-0001', 'MD-1001', 'OPEN']]);
+  assert.equal(prompts.length, 0);
+});
+
+test('free text or voice reaches the same features through the agent: complaint, payment link, menus, tracking', async () => {
+  Object.assign(sessions.get(PHONE), { greeted: true, lang: 'ar' });
+  modelTurns.push(
+    turn('ar', 'نعتذر منك!', { action: 'complaint', complaint: 'الأكل وصل بارد' }),
+    turn('ar', 'أكيد.', { action: 'payment_link' }),
+    turn('ar', 'تفضل القائمة.', { action: 'show_menu' }),
+    turn('ar', 'تفضل الأقسام.', { action: 'browse_menu' }),
+    turn('ar', 'لحظة أشوف.', { action: 'order_status' }),
+  );
+  await handleInbound({ phone: PHONE, text: 'الأكل وصلني بارد' });
+  assert.match(sentTexts(calls).at(-1).text, /نعتذر منك!\n\nتم تسجيل شكواك برقم C-0001/);
+  assert.equal(orders.listComplaints()[0].text, 'الأكل وصل بارد');
+
+  await handleInbound({ phone: PHONE, audioId: 'media-1', mimeType: 'audio/ogg' });
+  assert.match(sentTexts(calls).at(-1).text, /ما عندك طلب ينتظر الدفع/);
+
+  await handleInbound({ phone: PHONE, text: 'شنو الخيارات؟' });
+  assert.deepEqual(listOf(sentMessages(calls).at(-1)).map((r) => r.id)[0], 'menu:browse');
+  await handleInbound({ phone: PHONE, text: 'أبي أشوف المنيو' });
+  assert.deepEqual(listOf(sentMessages(calls).at(-1)).map((r) => r.id), ['cat:cat-1:0', 'cat:cat-2:0']);
+
+  sessions.get(PHONE).lastOrderId = 'order-1';
+  orderStatus = 'OUT_FOR_DELIVERY';
+  await handleInbound({ phone: PHONE, text: 'وين طلبي؟' });
+  assert.match(sentTexts(calls).at(-1).text, /آخر طلب لك MD-1001 حالته الآن: طالع للتوصيل/);
+});
+
+test('every dashboard status change reaches the customer, including Out for delivery and Reached', async () => {
+  orders.track({ order: { id: 'order-1', orderNumber: 'MD-1001', status: 'PENDING', total: '4', orderType: 'DELIVERY' }, phone: PHONE, lang: 'ar', paymentMethod: 'CASH' });
+  for (const status of ['PREPARING', 'OUT_FOR_DELIVERY', 'REACHED', 'DELIVERED']) {
+    orderStatus = status;
+    await orders.pollOnce();
+  }
+  const texts = sentTexts(calls).filter((m) => m.to === PHONE).map((m) => m.text);
+  assert.deepEqual(texts, ['الطلب MD-1001 قيد التجهيز.', 'طلبك MD-1001 طلع للتوصيل 🛵', 'المندوب وصل عند موقعك بالطلب MD-1001.', 'تم توصيل الطلب MD-1001.']);
 });
 
 test('place_order with missing details asks for them instead of calling the API', async () => {

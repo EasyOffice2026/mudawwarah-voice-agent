@@ -99,3 +99,6 @@ const requireAdmin = (req, res, next) => {
 
 // Customer comments on order, food and service, newest first.
 app.get('/feedback', requireAdmin, (_req, res) => res.json(orders.listFeedback()));
+
+// Complaints customers logged from the WhatsApp menu or by describing a problem, newest first.
+app.get('/complaints', requireAdmin, (_req, res) => res.json(orders.listComplaints()));
