@@ -4,6 +4,8 @@ import * as wa from './whatsapp.js';
 import * as orders from './orders.js';
 import * as payment from './payment.js';
 import { handleInbound } from './flow.js';
+import * as mdawra from './mdawra.js';
+import { catalogFeedCsv } from './catalog.js';
 
 export const app = express();
 app.use(express.json({ limit: '2mb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
@@ -102,3 +104,14 @@ app.get('/feedback', requireAdmin, (_req, res) => res.json(orders.listFeedback()
 
 // Complaints customers logged from the WhatsApp menu or by describing a problem, newest first.
 app.get('/complaints', requireAdmin, (_req, res) => res.json(orders.listComplaints()));
+
+// The menu as a product data feed for the WhatsApp catalogue (Commerce Manager → Data sources → Scheduled feed).
+// Public on purpose: it holds only what the website menu already shows.
+app.get('/catalog/feed.csv', async (_req, res) => {
+  try {
+    res.type('text/csv; charset=utf-8').send(catalogFeedCsv(await mdawra.getMenu()));
+  } catch (error) {
+    console.error('[catalog] feed failed', error.message);
+    res.status(502).send('Menu unavailable');
+  }
+});

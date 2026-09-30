@@ -22,6 +22,11 @@ export const config = {
     verifyToken: process.env.WHATSAPP_VERIFY_TOKEN || '',
     appSecret: process.env.WHATSAPP_APP_SECRET || '',
     sessionTtlMinutes: Number(process.env.SESSION_TTL_MINUTES || 120),
+    // Meta Commerce catalogue linked to the WhatsApp number; when set, "menu" opens it with photos and a cart.
+    catalogId: process.env.WHATSAPP_CATALOG_ID || '',
+    // Token with catalog_management for uploading the menu (defaults to WHATSAPP_TOKEN).
+    catalogToken: process.env.WHATSAPP_CATALOG_TOKEN || '',
+    catalogSiteUrl: process.env.CATALOG_SITE_URL || '',
   },
   payment: {
     provider: (process.env.PAYMENT_PROVIDER || 'none').toLowerCase(),

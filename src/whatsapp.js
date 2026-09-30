@@ -67,6 +67,28 @@ export const sendList = (to, text, buttonText, sections) =>
     },
   });
 
+/**
+ * A multi-product message from the catalogue: photos, names and prices grouped
+ * in sections, with WhatsApp's own cart (max 30 products, 10 sections).
+ */
+export const sendProductList = (to, { catalogId, header, body, sections }) =>
+  send({
+    to,
+    type: 'interactive',
+    interactive: {
+      type: 'product_list',
+      header: { type: 'text', text: truncate(header, 60) },
+      body: { text: truncate(body, 1024) },
+      action: {
+        catalog_id: catalogId,
+        sections: sections.map((section) => ({
+          title: truncate(section.title, 24),
+          product_items: section.productIds.map((id) => ({ product_retailer_id: id })),
+        })),
+      },
+    },
+  });
+
 /** Sends a publicly reachable image (JPEG/PNG, max 5 MB) by link. */
 export const sendImage = (to, link, caption) => send({ to, type: 'image', image: { link, caption: truncate(caption || '', 1024) } });
 
@@ -121,6 +143,11 @@ export const extractInput = (message) => {
   }
   if (message.type === 'button') return { text: message.button?.text || '' };
   if (message.type === 'audio' && message.audio?.id) return { text: '', audioId: message.audio.id };
+  // "Place order" from the WhatsApp cart.
+  if (message.type === 'order' && message.order) {
+    const products = (message.order.product_items || []).map((p) => ({ retailerId: p.product_retailer_id, quantity: Number(p.quantity), price: Number(p.item_price) }));
+    return { text: message.order.text || '', cartOrder: products };
+  }
   if (message.type === 'location' && message.location) {
     const { latitude, longitude, name, address } = message.location;
     return { text: '', location: { lat: Number(latitude), lng: Number(longitude), label: [name, address].filter(Boolean).join(', ') || null } };

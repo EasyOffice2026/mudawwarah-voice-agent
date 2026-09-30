@@ -44,6 +44,16 @@ test('health reports what is configured', async () => {
   assert.deepEqual(await res.json(), { ok: true, whatsapp: true, openai: true, payment: 'mock', tenant: 'mdawra' });
 });
 
+test('the catalogue feed lists every menu item with photo and KWD price, CSV-escaped', async () => {
+  const res = await fetch(`${base}/catalog/feed.csv`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /text\/csv/);
+  const lines = (await res.text()).replace(/^﻿/, '').trim().split('\n');
+  assert.equal(lines[0], 'id,title,description,availability,condition,price,link,image_link,brand');
+  assert.equal(lines[1], 'item-shawarma,Chicken Shawarma,شاورما دجاج,in stock,new,1.500 KWD,https://www.madawarah.com/r/mdawra,https://cdn.test/shawarma.png,Mudawwarah');
+  assert.equal(lines.length, 2, 'items without a photo are left out');
+});
+
 test('webhook verification handshake', async () => {
   const ok = await fetch(`${base}/webhook?hub.mode=subscribe&hub.verify_token=verify-me&hub.challenge=42`);
   assert.equal(await ok.text(), '42');

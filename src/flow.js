@@ -6,6 +6,7 @@ import * as wa from './whatsapp.js';
 import * as orders from './orders.js';
 import * as payment from './payment.js';
 import { t } from './copy.js';
+import { isCatalogEnabled, productListGroups, cartFromOrder } from './catalog.js';
 import {
   RESPONSE_SCHEMA,
   money,
@@ -180,6 +181,26 @@ const categoriesMenu = async (lang) => {
   return { text: copy.browseIntro, list: { button: copy.categoriesButton, sections: [{ title: copy.menuTitle, rows }] } };
 };
 
+/**
+ * "Menu": with a WhatsApp catalogue, product messages with photos and a cart
+ * (split by category when there are more than 30 items); without one, the
+ * category list.
+ */
+const catalogueMenu = async (lang) => {
+  if (!isCatalogEnabled()) return categoriesMenu(lang);
+  const copy = t(lang);
+  const groups = productListGroups(await mdawra.getMenu(), lang);
+  if (!groups.length) return categoriesMenu(lang);
+  return {
+    productLists: groups.map((sections, index) => ({
+      catalogId: config.whatsapp.catalogId,
+      header: groups.length > 1 ? `${copy.catalogHeader} (${index + 1}/${groups.length})` : copy.catalogHeader,
+      body: copy.catalogBody,
+      sections,
+    })),
+  };
+};
+
 const ITEMS_PER_PAGE = 9;
 
 /** One category's items with name and price; a "More items…" row pages through long categories. */
@@ -249,7 +270,7 @@ const GREETING = /^(hi+|hello+|hey+|hala|salam|good (morning|evening)|السلا
 const handleMenu = async (session, { replyId, text }) => {
   const copy = t(session.lang);
   const typed = (text || '').trim();
-  if (replyId === 'menu:browse') return categoriesMenu(session.lang);
+  if (replyId === 'menu:browse') return catalogueMenu(session.lang);
   if (replyId === 'menu:track') return orderStatus(session);
   if (replyId === 'menu:pay' || (!replyId && asksForLink(typed))) return paymentLinkReply(session);
   if (replyId === 'menu:complaint') {
@@ -263,7 +284,7 @@ const handleMenu = async (session, { replyId, text }) => {
   const category = /^cat:(.+):(\d+)$/.exec(replyId || '');
   if (category) return itemsMenu(session.lang, category[1], Number(category[2]));
   if (!replyId && MENU_WORDS.test(typed)) return mainMenu(session.lang);
-  if (!replyId && CATALOGUE_WORDS.test(typed)) return categoriesMenu(session.lang);
+  if (!replyId && CATALOGUE_WORDS.test(typed)) return catalogueMenu(session.lang);
   return null;
 };
 
@@ -299,13 +320,15 @@ export const runAgent = async (session, text) => {
   const parts = [result.reply];
   let buttons = null;
   let list = null;
-  /** Adds a reply that may carry buttons or a list alongside its text. */
+  let productLists = null;
+  /** Adds a reply that may carry buttons, a list or catalogue messages alongside its text. */
   const attach = (extra) => {
     if (!extra) return;
     if (typeof extra === 'string') return parts.push(extra);
     parts.push(extra.text);
     buttons = extra.buttons || buttons;
     list = extra.list || list;
+    productLists = extra.productLists || productLists;
   };
   if (missingOptions.length) parts.push(missingOptionsNote(session.lang, missingOptions));
   switch (result.action) {
@@ -313,7 +336,7 @@ export const runAgent = async (session, text) => {
       list = mainMenu(session.lang).list;
       break;
     case 'browse_menu':
-      list = (await categoriesMenu(session.lang)).list;
+      attach({ ...(await catalogueMenu(session.lang)), text: '' });
       break;
     case 'payment_link':
       attach(await paymentLinkReply(session));
@@ -356,7 +379,7 @@ export const runAgent = async (session, text) => {
   }
   sessions.remember(session, 'assistant', result.reply);
   sessions.save(session);
-  return { text: parts.filter(Boolean).join('\n\n'), buttons, list, photos: photosFor(result.photos, catalogue, session.lang) };
+  return { text: parts.filter(Boolean).join('\n\n'), buttons, list, productLists, photos: photosFor(result.photos, catalogue, session.lang) };
 };
 
 /** Confirm / Change buttons under the order review; confirming places the order without asking the model. */
@@ -416,7 +439,7 @@ export const handleAfterSales = async (session, { text, replyId }) => {
 };
 
 /** Entry point for one inbound WhatsApp message. */
-export const handleInbound = async ({ phone, waName, text, replyId, audioId, mimeType, location, unsupported }) => {
+export const handleInbound = async ({ phone, waName, text, replyId, audioId, mimeType, location, unsupported, cartOrder }) => {
   const session = sessions.get(phone, waName);
   const copy = () => t(session.lang);
   let utterance = text || '';
@@ -430,6 +453,23 @@ export const handleInbound = async ({ phone, waName, text, replyId, audioId, mim
 
   const orderButton = await handleOrderButton(session, replyId, text);
   if (orderButton) return finish(session, orderButton, false);
+
+  // "Place order" from the WhatsApp cart: the cart becomes the order draft and
+  // the agent carries on with whatever is still missing (address, payment…).
+  let unavailableNote = null;
+  if (cartOrder) {
+    session.greeted = true;
+    if (!session.lang) session.lang = detectLang(text, 'en');
+    const categories = await mdawra.getMenu();
+    const { lines, unavailable } = cartFromOrder(cartOrder, categories);
+    if (!lines.length) return finish(session, copy().cartUnavailable, false);
+    session.cart = lines;
+    session.awaitingConfirmation = false;
+    if (unavailable.length) unavailableNote = copy().someUnavailable;
+    const catalogue = buildCatalogue(categories);
+    const summary = lines.map((l) => `${l.quantity} × ${localName(catalogue.items.find((c) => c.item.id === l.menuItemId).item, session.lang)}`).join(', ');
+    utterance = `[Sent a cart from the WhatsApp catalogue: ${summary}]${text ? ` ${text}` : ''}`;
+  }
 
   if (audioId) {
     if (!isOpenAiConfigured()) return finish(session, copy().aiUnavailable, false);
@@ -472,7 +512,7 @@ export const handleInbound = async ({ phone, waName, text, replyId, audioId, mim
   const afterSales = await handleAfterSales(session, { text: utterance, replyId });
   if (afterSales) return finish(session, afterSales, fromVoice);
 
-  if (session.complaint?.stage === 'DESCRIBE' && utterance.trim()) {
+  if (session.complaint?.stage === 'DESCRIBE' && utterance.trim() && !cartOrder) {
     session.complaint = null;
     return finish(session, await logComplaint(session, utterance.trim()), fromVoice);
   }
@@ -483,12 +523,13 @@ export const handleInbound = async ({ phone, waName, text, replyId, audioId, mim
     const seen = new Set(tapPhotos.map((p) => p.url));
     reply.photos = [...tapPhotos, ...(reply.photos || []).filter((p) => !seen.has(p.url))].slice(0, 3);
   }
+  if (unavailableNote && typeof reply === 'object') reply.text = `${unavailableNote}\n\n${reply.text}`;
   return finish(session, reply, fromVoice);
 };
 
 /** Sends a reply: photos first, then the text (with a list or buttons when given), then an optional voice note. */
 const finish = async (session, reply, voice) => {
-  const { text: rawText, buttons, list, photos } = typeof reply === 'string' ? { text: reply } : reply;
+  const { text: rawText, buttons, list, photos, productLists } = typeof reply === 'string' ? { text: reply } : reply;
   const text = rawText || (list ? t(session.lang).menuPrompt : '');
   sessions.save(session);
   for (const photo of photos || []) {
@@ -497,6 +538,11 @@ const finish = async (session, reply, voice) => {
     } catch (error) {
       console.error('[flow] photo failed', photo.url, error.message);
     }
+  }
+  if (productLists?.length) {
+    if (text) await wa.sendText(session.phone, text);
+    for (const productList of productLists) await wa.sendProductList(session.phone, productList);
+    return text || t(session.lang).catalogBody;
   }
   if (list) {
     if (text.length <= 1024) {
