@@ -39,8 +39,13 @@ const isDuplicate = (id) => {
 };
 
 app.post('/webhook', (req, res) => {
-  if (!wa.verifySignature(req.rawBody, req.get('x-hub-signature-256'))) return res.sendStatus(401);
+  if (!wa.verifySignature(req.rawBody, req.get('x-hub-signature-256'))) {
+    console.error('[webhook] rejected: invalid signature (check WHATSAPP_APP_SECRET)');
+    return res.sendStatus(401);
+  }
   res.sendStatus(200);
+  const fields = (req.body?.entry || []).flatMap((e) => (e.changes || []).map((c) => c.field));
+  console.log('[webhook] received', fields.join(',') || '(no changes)');
   for (const entry of req.body?.entry || []) {
     for (const change of entry.changes || []) {
       const value = change.value || {};
@@ -94,3 +99,6 @@ const requireAdmin = (req, res, next) => {
 
 // Customer comments on order, food and service, newest first.
 app.get('/feedback', requireAdmin, (_req, res) => res.json(orders.listFeedback()));
+
+// Complaints customers logged from the WhatsApp menu or by describing a problem, newest first.
+app.get('/complaints', requireAdmin, (_req, res) => res.json(orders.listComplaints()));

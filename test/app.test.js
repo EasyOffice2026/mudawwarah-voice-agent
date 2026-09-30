@@ -2,7 +2,7 @@ import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 process.env.WHATSAPP_APP_SECRET = 'app-secret';
-const { mockFetch, sentTexts, menu, settings } = await import('./helpers.js');
+const { mockFetch, sentTexts, sentMessages, menu, settings } = await import('./helpers.js');
 const { app } = await import('../src/app.js');
 const orders = await import('../src/orders.js');
 const wa = await import('../src/whatsapp.js');
@@ -60,8 +60,11 @@ test('webhook rejects bad signatures, accepts good ones and ignores duplicates',
     assert.equal(res.status, 200);
   }
   await new Promise((r) => setTimeout(r, 50));
-  const replies = sentTexts(calls).filter((m) => m.to === '96555');
-  assert.deepEqual(replies, [{ to: '96555', text: 'Hello!' }]);
+  // A first "hi" is greeted with the welcome and the main menu list — once, despite the duplicate delivery.
+  const replies = sentMessages(calls).filter((m) => m.to === '96555');
+  assert.deepEqual(replies.map((m) => m.type), ['interactive']);
+  assert.match(replies[0].text, /Welcome to Mudawwarah/);
+  assert.equal(replies[0].body.interactive.type, 'list');
   assert.ok(wa.verifySignature(Buffer.from(body), sign(body)));
 });
 

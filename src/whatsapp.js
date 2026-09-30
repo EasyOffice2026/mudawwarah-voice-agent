@@ -42,6 +42,34 @@ export const sendButtons = (to, text, buttons) =>
 
 export const sendAudio = (to, mediaId) => send({ to, type: 'audio', audio: { id: mediaId } });
 
+/**
+ * A tappable list menu: one button that opens up to 10 rows in total across its
+ * sections. WhatsApp caps titles at 24 characters and descriptions at 72.
+ */
+export const sendList = (to, text, buttonText, sections) =>
+  send({
+    to,
+    type: 'interactive',
+    interactive: {
+      type: 'list',
+      body: { text: truncate(text, 1024) },
+      action: {
+        button: truncate(buttonText, 20),
+        sections: sections.map((section) => ({
+          title: truncate(section.title, 24),
+          rows: section.rows.map((row) => ({
+            id: truncate(row.id, 200),
+            title: truncate(row.title, 24),
+            ...(row.description ? { description: truncate(row.description, 72) } : {}),
+          })),
+        })),
+      },
+    },
+  });
+
+/** Sends a publicly reachable image (JPEG/PNG, max 5 MB) by link. */
+export const sendImage = (to, link, caption) => send({ to, type: 'image', image: { link, caption: truncate(caption || '', 1024) } });
+
 export const markAsRead = async (messageId) => {
   if (!isWhatsappConfigured() || !messageId) return;
   await fetch(`${graphBase()}/${config.whatsapp.phoneNumberId}/messages`, {
@@ -93,5 +121,12 @@ export const extractInput = (message) => {
   }
   if (message.type === 'button') return { text: message.button?.text || '' };
   if (message.type === 'audio' && message.audio?.id) return { text: '', audioId: message.audio.id };
-  return { text: '' };
+  if (message.type === 'location' && message.location) {
+    const { latitude, longitude, name, address } = message.location;
+    return { text: '', location: { lat: Number(latitude), lng: Number(longitude), label: [name, address].filter(Boolean).join(', ') || null } };
+  }
+  // A photo or video with a caption is read as the caption; anything else (stickers, files, contacts…) is not understood.
+  const caption = message[message.type]?.caption;
+  if (caption) return { text: caption };
+  return { text: '', unsupported: true };
 };

@@ -42,10 +42,11 @@ export const config = {
     apiKey: process.env.OPENAI_API_KEY || '',
     baseUrl: (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, ''),
     chatModel: process.env.CHAT_MODEL || 'gpt-4o-mini',
-    transcribeModel: process.env.TRANSCRIBE_MODEL || 'whisper-1',
+    transcribeModel: process.env.TRANSCRIBE_MODEL || 'gpt-4o-mini-transcribe',
     ttsModel: process.env.TTS_MODEL || 'gpt-4o-mini-tts',
     ttsVoice: process.env.TTS_VOICE || 'alloy',
-    voiceReplies: bool(process.env.VOICE_REPLIES, true),
+    // Off by default: the restaurant prefers text replies; voice notes are still understood.
+    voiceReplies: bool(process.env.VOICE_REPLIES, false),
     historyLimit: Number(process.env.HISTORY_LIMIT || 16),
   },
 };
