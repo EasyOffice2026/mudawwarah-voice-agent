@@ -16,7 +16,7 @@ const nullableString = { type: ['string', 'null'] };
 export const RESPONSE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['lang', 'reply', 'add', 'remove', 'photos', 'customer', 'orderType', 'paymentMethod', 'action', 'complaint'],
+  required: ['lang', 'reply', 'add', 'remove', 'photos', 'customer', 'orderType', 'pickupBranch', 'paymentMethod', 'action', 'complaint'],
   properties: {
     lang: { type: 'string', enum: ['en', 'ar'], description: 'Language the customer is using.' },
     reply: { type: 'string', description: 'What to say to the customer, in their language. Plain spoken text, 1-3 sentences.' },
@@ -59,6 +59,10 @@ export const RESPONSE_SCHEMA = {
       type: ['string', 'null'],
       enum: ['CASH', 'CARD', 'ONLINE', null],
       description: 'CASH = cash on delivery, CARD = card machine on delivery, ONLINE = pay now by KNET/card through a link.',
+    },
+    pickupBranch: {
+      type: ['integer', 'null'],
+      description: 'Branch number from PICKUP BRANCHES when the customer chose where to collect the order in this message; null otherwise.',
     },
     action: { type: 'string', enum: ACTIONS },
     complaint: {
@@ -137,8 +141,8 @@ const PAYMENT_LABELS = {
   CARD: 'card machine on delivery',
 };
 
-/** What still has to be collected before the order can be placed. */
-export const missingForOrder = (session, settings) => {
+/** What still has to be collected before the order can be placed. Pickup needs a branch when the restaurant has branches. */
+export const missingForOrder = (session, settings, branches = []) => {
   const missing = [];
   if (!session.cart?.length) missing.push('items');
   if (!session.customer?.name) missing.push('name');
@@ -148,13 +152,26 @@ export const missingForOrder = (session, settings) => {
   if (orderType === 'DELIVERY') {
     for (const field of ADDRESS_FIELDS) if (!session.customer?.[field]) missing.push(field);
   }
+  if (orderType === 'PICKUP' && branches.length && !branches.some((b) => b.id === session.pickupLocationId)) missing.push('pickupBranch');
   if (!session.paymentMethod) missing.push('paymentMethod');
   return { missing, orderType };
 };
 
-export const systemPrompt = ({ settings, catalogue, session, restaurantName, onlinePayment = false }) => {
+/** Pickup branches for the prompt: number, names, open now or not, today's hours and prep time. */
+const branchLines = (branches, status) =>
+  branches
+    .map((b, index) => {
+      const { open, hours, opens } = status(b);
+      const ar = b.nameAr && !/^[?\s]+$/.test(b.nameAr) ? ` / ${b.nameAr}` : '';
+      const where = [b.addressEn, b.directionsEn].filter(Boolean).join(', ');
+      return `[${index + 1}] ${b.nameEn}${ar} — ${open ? 'OPEN now' : `CLOSED now${opens ? `, opens ${opens}` : ''}`}${hours ? `, today ${hours}` : ''}, ready ~${b.prepMinutes || 15} min${where ? ` — ${where}` : ''}`;
+    })
+    .join('\n');
+
+export const systemPrompt = ({ settings, catalogue, session, restaurantName, onlinePayment = false, branches = [], branchStatus = () => ({ open: true }) }) => {
   const isOpen = settings.isOpen !== 'false';
-  const { missing, orderType } = missingForOrder(session, settings);
+  const { missing, orderType } = missingForOrder(session, settings, branches);
+  const chosenBranch = branches.find((b) => b.id === session.pickupLocationId);
   const payments = allowedPaymentMethods(settings, onlinePayment);
   const c = session.customer || {};
   const known = [
@@ -167,8 +184,13 @@ export const systemPrompt = ({ settings, catalogue, session, restaurantName, onl
     session.orderType && `order type: ${session.orderType}`,
     session.paymentMethod && `payment: ${session.paymentMethod}`,
     session.location && 'map pin: shared',
+    session.orderType === 'PICKUP' && chosenBranch && `pickup branch: ${chosenBranch.nameEn}`,
   ].filter(Boolean);
   const pickup = settings.pickupEnabled === 'true';
+  const pickupBranches =
+    pickup && branches.length
+      ? `\nPICKUP BRANCHES (the customer collects the order; no address needed)\n${branchLines(branches, branchStatus)}\n- If the customer wants pickup, ask which branch unless ORDER DRAFT already has one (name the open ones briefly); put the chosen branch number in "pickupBranch" and set "orderType" to PICKUP. Match names loosely in Arabic or English ("الجهراء" = Al Jahra, "صباح الأحمد" = Sabah Al Ahmed). A pickup order needs NO address: once they choose pickup, never ask for area, block, street or building, even if "Still missing" below lists them (it was worked out before this message). A CLOSED branch cannot take the order now: say when it opens and suggest an open branch or delivery. They can also tap "Pickup branches" in the main menu.\n`
+      : '';
 
   return `You are the voice sales agent of ${restaurantName}, a restaurant in Kuwait, talking to a customer over WhatsApp (voice notes and chat).
 
@@ -203,7 +225,7 @@ COMPLETING THE ORDER
 ${isOpen ? '' : `- The restaurant is CLOSED now (hours: ${settings.workingHours}). Take items into the cart if they like, but explain the order can only be placed during working hours.\n`}
 RESTAURANT
 - Working hours: ${settings.workingHours}. Delivery fee: ${money(settings.deliveryFee || 0)}. Minimum order: ${money(settings.minimumOrder || 0)}.${Number(settings.serviceChargePercent) > 0 ? ` Service charge: ${settings.serviceChargePercent}%.` : ''}
-
+${pickupBranches}
 CURRENT CART
 ${describeCart(session.cart, catalogue)}
 
@@ -284,8 +306,8 @@ export const missingOptionsNote = (lang, missingOptions) =>
     .join('\n\n');
 
 const FIELD_LABELS = {
-  en: { items: 'something to order', name: 'your name', area: 'your area', block: 'block', street: 'street', building: 'building/house number', paymentMethod: 'how you want to pay' },
-  ar: { items: 'طلبك', name: 'اسمك', area: 'المنطقة', block: 'القطعة', street: 'الشارع', building: 'رقم المنزل/البناية', paymentMethod: 'طريقة الدفع' },
+  en: { items: 'something to order', name: 'your name', area: 'your area', block: 'block', street: 'street', building: 'building/house number', pickupBranch: 'which branch you will pick up from', paymentMethod: 'how you want to pay' },
+  ar: { items: 'طلبك', name: 'اسمك', area: 'المنطقة', block: 'القطعة', street: 'الشارع', building: 'رقم المنزل/البناية', pickupBranch: 'أي فرع تبي تستلم منه', paymentMethod: 'طريقة الدفع' },
 };
 
 export const missingFieldsNote = (lang, missing) => {

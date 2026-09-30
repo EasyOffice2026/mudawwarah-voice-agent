@@ -35,6 +35,9 @@ export const getMenu = () => cached('menu', () => request('/categories'));
 
 export const getSettings = () => cached('settings', () => request('/settings'));
 
+/** Active pickup branches with their weekly hours, as the website's checkout shows them. */
+export const getPickupLocations = () => cached('pickup-locations', () => request('/pickup-locations'));
+
 export const createOrder = (payload) => request('/orders', { method: 'POST', body: JSON.stringify(payload) });
 
 export const trackOrder = (id) => request(`/orders/track/${id}`);

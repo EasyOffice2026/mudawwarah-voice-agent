@@ -47,7 +47,7 @@ complaints.push(...readJson(COMPLAINTS_FILE, []));
 
 const persist = () => writeJson(FILE, Object.fromEntries(tracked));
 
-export const track = ({ order, phone, lang, paymentMethod, paymentReference = null, paymentUrl = null }) => {
+export const track = ({ order, phone, lang, paymentMethod, paymentReference = null, paymentUrl = null, pickupBranch = null }) => {
   const entry = {
     id: order.id,
     orderNumber: order.orderNumber,
@@ -58,6 +58,7 @@ export const track = ({ order, phone, lang, paymentMethod, paymentReference = nu
     paymentMethod,
     paymentReference,
     paymentUrl,
+    pickupBranch,
     paid: paymentMethod !== 'ONLINE',
     status: order.status || 'PENDING',
     receiptAsked: false,
@@ -99,7 +100,7 @@ export const notifyKitchen = async (text) => {
 
 export const orderSummaryForKitchen = (order, customer, location = null) => {
   const lines = (order.items || []).map((i) => `${i.quantity} × ${i.nameEn}${i.customizations?.length ? ` (${i.customizations.map((c) => c.nameEn).join(', ')})` : ''}`);
-  const where = order.orderType === 'PICKUP' ? 'PICKUP' : `Delivery: ${order.address || [customer.area, customer.block, customer.street, customer.building].filter(Boolean).join(', ')}`;
+  const where = order.orderType === 'PICKUP' ? `PICKUP${order.pickupLocation?.nameEn ? ` — ${order.pickupLocation.nameEn} branch` : ''}` :`Delivery: ${order.address || [customer.area, customer.block, customer.street, customer.building].filter(Boolean).join(', ')}`;
   return [
     `New WhatsApp order ${order.orderNumber}`,
     ...lines,
@@ -129,7 +130,7 @@ export const markPaymentFailed = async (entry) => {
 export const announceStatus = async (entry, status) => {
   const copy = t(entry.lang);
   const message = copy.status[status];
-  if (message) await wa.sendText(entry.phone, message(entry.orderNumber, entry.orderType));
+  if (message) await wa.sendText(entry.phone, message(entry.orderNumber, entry.orderType, entry.pickupBranch));
   if (status === 'DELIVERED' || (status === 'READY' && entry.orderType === 'PICKUP')) {
     await wa.sendButtons(entry.phone, copy.askReceipt(entry.orderNumber), [
       { id: `received:${entry.id}`, title: copy.received },
