@@ -9,6 +9,11 @@ export const config = {
   port: Number(process.env.PORT || 4100),
   publicUrl: (process.env.PUBLIC_URL || `http://localhost:${process.env.PORT || 4100}`).replace(/\/$/, ''),
   adminToken: process.env.ADMIN_TOKEN || '',
+  // The web menu page (photos + cart) sent as a link in the chat. Needs an https PUBLIC_URL.
+  menuPage: {
+    enabled: process.env.MENU_PAGE !== 'false',
+    secret: process.env.MENU_LINK_SECRET || '',
+  },
   dataDir: process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : null,
   mdawra: {
     apiUrl: (process.env.MDAWRA_API_URL || 'http://localhost:4000/api').replace(/\/$/, ''),

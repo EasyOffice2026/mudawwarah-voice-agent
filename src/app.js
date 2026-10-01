@@ -5,7 +5,9 @@ import * as orders from './orders.js';
 import * as payment from './payment.js';
 import { handleInbound } from './flow.js';
 import * as mdawra from './mdawra.js';
+import * as sessions from './sessions.js';
 import { catalogFeedCsv } from './catalog.js';
+import { verifyMenuToken, renderMenuPage, cartFromPage } from './menuPage.js';
 
 export const app = express();
 app.use(express.json({ limit: '2mb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
@@ -104,6 +106,40 @@ app.get('/feedback', requireAdmin, (_req, res) => res.json(orders.listFeedback()
 
 // Complaints customers logged from the WhatsApp menu or by describing a problem, newest first.
 app.get('/complaints', requireAdmin, (_req, res) => res.json(orders.listComplaints()));
+
+// The web menu page a customer opens from the chat. The link is signed for their number and expires.
+const expiredPage = '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><body style="font-family:system-ui,sans-serif;text-align:center;padding:3rem 1.5rem"><h2>This link has expired · انتهت صلاحية الرابط</h2><p>Type "menu" in WhatsApp to get a new one.<br>اكتب "منيو" في الواتساب عشان يوصلك رابط جديد.</p></body>';
+
+app.get('/m/:token', async (req, res) => {
+  const phone = verifyMenuToken(req.params.token);
+  if (!phone) return res.status(403).type('html').send(expiredPage);
+  try {
+    const [categories, settings] = await Promise.all([mdawra.getMenu(), mdawra.getSettings()]);
+    const session = sessions.get(phone);
+    res.set('Cache-Control', 'no-store');
+    return res.type('html').send(
+      renderMenuPage({ categories, cart: session.cart, lang: session.lang, token: req.params.token, minimumOrder: settings.minimumOrder, restaurantName: settings.restaurantName || 'Mudawwarah' }),
+    );
+  } catch (error) {
+    console.error('[menu-page] could not render', error.message);
+    return res.status(502).type('html').send('<!doctype html><meta charset="utf-8"><body style="font-family:system-ui;text-align:center;padding:3rem">Menu unavailable — please try again in a moment.</body>');
+  }
+});
+
+// "Send order" on the menu page: the cart goes to the customer's chat and the bot carries on there.
+app.post('/m/:token/order', async (req, res) => {
+  const phone = verifyMenuToken(req.params.token);
+  if (!phone) return res.status(403).json({ error: 'expired' });
+  try {
+    const lines = cartFromPage(req.body?.items, await mdawra.getMenu());
+    if (!lines.length) return res.status(400).json({ error: 'empty' });
+    await handleInbound({ phone, text: '', pageCart: lines });
+    return res.json({ ok: true, whatsapp: await wa.chatLink() });
+  } catch (error) {
+    console.error('[menu-page] order failed', error.message);
+    return res.status(502).json({ error: 'failed' });
+  }
+});
 
 // The menu as a product data feed for the WhatsApp catalogue (Commerce Manager → Data sources → Scheduled feed).
 // Public on purpose: it holds only what the website menu already shows.
