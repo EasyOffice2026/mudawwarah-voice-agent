@@ -64,6 +64,10 @@ const dictionary = {
     changeBranchButton: 'Change branch',
     reviewButton: 'Review my order',
     branchClosed: (name, opens) => `Our ${name} branch is closed right now${opens ? ` and opens at ${opens}` : ''}. Please choose another branch or order for delivery.`,
+    areaNotCovered: (area, areas) =>
+      `Sorry, we do not deliver to ${area} yet. We deliver to: ${areas.join(', ')}. You can also pick up your order from one of our branches.`,
+    zoneBranchClosed: (area, opens) =>
+      `The branch that delivers to ${area} is closed right now${opens ? ` and opens at ${opens}` : ''}. You can order for later once it opens.`,
     menuPageBody: 'Browse the full menu with photos, add everything you want with + / −, then press "Send order". Your order comes straight back to this chat.',
     menuPageButton: 'Open menu',
     flowHeader: 'Mudawwarah menu',
@@ -186,6 +190,8 @@ const dictionary = {
     changeBranchButton: 'غيّر الفرع',
     reviewButton: 'راجع طلبي',
     branchClosed: (name, opens) => `فرع ${name} مسكّر الحين${opens ? ` ويفتح الساعة ${opens}` : ''}. اختر فرع ثاني أو اطلب توصيل.`,
+    areaNotCovered: (area, areas) => `نعتذر، ما نوصل لـ ${area} للحين. نوصل لـ: ${areas.join('، ')}. وتقدر تستلم طلبك من أحد فروعنا.`,
+    zoneBranchClosed: (area, opens) => `الفرع اللي يوصل لـ ${area} مسكّر الحين${opens ? ` ويفتح الساعة ${opens}` : ''}. تقدر تطلب أول ما يفتح.`,
     menuPageBody: 'تصفح المنيو كامل بالصور، أضف كل اللي تبيه بـ + / −، وبعدين اضغط "أرسل الطلب". طلبك يوصل لهالمحادثة على طول.',
     menuPageButton: 'افتح المنيو',
     flowHeader: 'منيو مدورة',

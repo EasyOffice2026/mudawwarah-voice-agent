@@ -32,6 +32,7 @@ let createdOrders = [];
 let calls;
 let orderStatus = 'PENDING';
 let branches = [];
+let zones = [];
 
 // Pickup branches as the website returns them: open 24h (equal open/close) or closed every day.
 const allWeek = (entry) => Array.from({ length: 7 }, (_, day) => ({ day, ...entry }));
@@ -47,10 +48,12 @@ beforeEach(() => {
   createdOrders = [];
   orderStatus = 'PENDING';
   branches = [];
+  zones = [];
   calls = mockFetch({
     'GET /categories': () => ({ json: menu }),
     'GET /settings': () => ({ json: settings }),
     'GET /pickup-locations': () => ({ json: branches }),
+    'GET /zones': () => ({ json: zones }),
     'POST /orders': (_url, init) => {
       const payload = JSON.parse(init.body);
       createdOrders.push(payload);
@@ -610,4 +613,51 @@ test('a not-received reply alerts the kitchen', async () => {
   assert.match(texts.find((m) => m.to === KITCHEN).text, /MD-9 NOT received/);
   assert.match(texts.find((m) => m.to === PHONE).text, /نعتذر منك/);
   assert.equal(orders.get('order-9'), null);
+});
+
+// Delivery zones as the website's GET /zones returns them.
+const ZONE = (nameEn, nameAr, extra = {}) => ({ id: `z-${nameEn}`, nameEn, nameAr, branchId: 'b-jahra', deliveryFee: 0.5, minimumOrder: 2, etaMinutes: 35, isActive: true, branch: { id: 'b-jahra', nameEn: 'Al Jahra', openNow: true, nextOpen: null }, ...extra });
+const deliverySession = (area) => ({
+  greeted: true,
+  lang: 'en',
+  cart: [{ menuItemId: 'item-shawarma', quantity: 2, optionIds: ['opt-garlic'] }],
+  customer: { name: 'Sara', area, block: '3', street: '10', building: '5', notes: null },
+  orderType: 'DELIVERY',
+  paymentMethod: 'CASH',
+});
+
+test('with zones, an uncovered area is refused kindly with the list of areas and the pickup option', async () => {
+  zones = [ZONE('Jahra', 'الجهراء'), ZONE('Ardiya', 'العارضية')];
+  Object.assign(sessions.get(PHONE), deliverySession('Salmiya'));
+  modelTurns.push(turn('en', 'Placing it now!', { action: 'place_order' }));
+  await handleInbound({ phone: PHONE, text: 'place it' });
+  assert.equal(sentTexts(calls).at(-1).text, 'Sorry, we do not deliver to Salmiya yet. We deliver to: Jahra, Ardiya. You can also pick up your order from one of our branches.');
+  assert.equal(createdOrders.length, 0);
+  assert.match(prompts[0].messages[0].content, /DELIVERY AREAS[\s\S]*- Jahra \/ الجهراء — served by Al Jahra, OPEN now, delivery fee 0\.500 KWD, minimum 2\.000 KWD, ~35 min/);
+});
+
+test('a covered area (typed in Arabic) uses the zone fee, and the order carries the zone', async () => {
+  zones = [ZONE('Jahra', 'الجهراء', { deliveryFee: 0.25 })];
+  Object.assign(sessions.get(PHONE), deliverySession('الجهراء'));
+  modelTurns.push(turn('en', 'Here is your order.', { action: 'place_order' }));
+  await handleInbound({ phone: PHONE, text: 'place it' });
+  assert.match(sentMessages(calls).at(-1).text, /Delivery fee: 0\.250 KWD/);
+  await handleInbound({ phone: PHONE, replyId: 'order:confirm', text: 'Confirm order' });
+  assert.equal(createdOrders[0].zoneId, 'z-Jahra');
+  assert.equal(createdOrders[0].area, 'Jahra');
+});
+
+test('a closed zone branch and the zone minimum are enforced before anything is placed', async () => {
+  zones = [ZONE('Jahra', 'الجهراء', { branch: { id: 'b-jahra', nameEn: 'Al Jahra', openNow: false, nextOpen: { time: '13:00', daysAhead: 0 } } })];
+  Object.assign(sessions.get(PHONE), deliverySession('Jahra'));
+  modelTurns.push(turn('en', 'ok', { action: 'place_order' }));
+  await handleInbound({ phone: PHONE, text: 'place it' });
+  assert.equal(sentTexts(calls).at(-1).text, 'The branch that delivers to Jahra is closed right now and opens at 13:00. You can order for later once it opens.');
+
+  zones = [ZONE('Jahra', 'الجهراء', { minimumOrder: 5 })];
+  mdawra.clearCache();
+  modelTurns.push(turn('en', 'ok', { action: 'place_order' }));
+  await handleInbound({ phone: PHONE, text: 'place it' });
+  assert.equal(sentTexts(calls).at(-1).text, 'The minimum order is 5.000 KWD — shall I add something else?');
+  assert.equal(createdOrders.length, 0);
 });

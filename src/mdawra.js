@@ -38,6 +38,9 @@ export const getSettings = () => cached('settings', () => request('/settings'));
 /** Active pickup branches with their weekly hours, as the website's checkout shows them. */
 export const getPickupLocations = () => cached('pickup-locations', () => request('/pickup-locations'));
 
+/** Delivery zones (area → branch, fee, minimum, ETA, branch open now), as the website's checkout uses them. */
+export const getZones = () => cached('zones', () => request('/zones'));
+
 export const createOrder = (payload) => request('/orders', { method: 'POST', body: JSON.stringify(payload) });
 
 export const trackOrder = (id) => request(`/orders/track/${id}`);

@@ -1,7 +1,7 @@
 /**
  * The menu as a small web page served by this bot: photos, categories, +/−
- * quantities and a cart, opened from a button in the WhatsApp chat (inside
- * WhatsApp's own browser). "Send order" posts the cart back here and the chat
+ * quantities and a cart, opened from a button in the WhatsApp chat (in the
+ * phone's browser: WhatsApp has no in-app browser on iPhone). "Send order" posts the cart back here, returns the customer to the chat, and the chat
  * carries on. It needs no Meta approval, unlike the catalogue or WhatsApp Flows.
  *
  * Each link is signed for one customer's phone number and expires, so a cart can
@@ -286,6 +286,8 @@ export const renderMenuPage = ({ categories, cart = [], lang = 'en', token, mini
       if (body.whatsapp) { const a = el('a', '', T.back); a.href = body.whatsapp; done.append(a); }
       document.body.replaceChildren(done);
       scrollTo(0, 0);
+      // Links open in the phone's browser, not inside WhatsApp: go straight back to the chat.
+      if (body.whatsapp) setTimeout(() => { location.href = body.whatsapp; }, 1200);
     } catch (error) {
       $('error').textContent = error.message || T.fail;
       $('error').hidden = false;

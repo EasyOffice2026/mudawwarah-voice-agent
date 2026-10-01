@@ -5,6 +5,8 @@
  * price — everything it returns is validated against the catalogue here.
  */
 
+import { matchZone } from './branches.js';
+
 export const money = (value) => `${Number(value).toFixed(3)} KWD`;
 const round3 = (value) => Number(Number(value).toFixed(3));
 
@@ -141,8 +143,11 @@ const PAYMENT_LABELS = {
   CARD: 'card machine on delivery',
 };
 
-/** What still has to be collected before the order can be placed. Pickup needs a branch when the restaurant has branches. */
-export const missingForOrder = (session, settings, branches = []) => {
+/**
+ * What still has to be collected before the order can be placed. Pickup needs a branch when the restaurant has
+ * branches; delivery needs an area inside one of the delivery zones when the restaurant has zones.
+ */
+export const missingForOrder = (session, settings, branches = [], zones = []) => {
   const missing = [];
   if (!session.cart?.length) missing.push('items');
   if (!session.customer?.name) missing.push('name');
@@ -154,6 +159,7 @@ export const missingForOrder = (session, settings, branches = []) => {
     missing.push('orderType');
   } else if (orderType === 'DELIVERY') {
     for (const field of ADDRESS_FIELDS) if (!session.customer?.[field]) missing.push(field);
+    if (zones.length && session.customer?.area && !matchZone(session.customer.area, zones)) missing.push('deliveryArea');
   }
   if (orderType === 'PICKUP' && branches.length && !branches.some((b) => b.id === session.pickupLocationId)) missing.push('pickupBranch');
   if (!session.paymentMethod) missing.push('paymentMethod');
@@ -171,10 +177,25 @@ const branchLines = (branches, status) =>
     })
     .join('\n');
 
-export const systemPrompt = ({ settings, catalogue, session, restaurantName, onlinePayment = false, branches = [], branchStatus = () => ({ open: true }) }) => {
+/** Delivery zones for the prompt: the only areas delivered to, with branch, open status, fee, minimum and ETA. */
+const zoneLines = (zones, settings) =>
+  zones
+    .map((z) => {
+      const ar = z.nameAr ? ` / ${z.nameAr}` : '';
+      const open = z.branch?.openNow !== false;
+      const opens = z.branch?.nextOpen?.time ? `, opens ${z.branch.nextOpen.time}` : '';
+      return `- ${z.nameEn}${ar} — served by ${z.branch?.nameEn || 'a branch'}, ${open ? 'OPEN now' : `CLOSED now${opens}`}, delivery fee ${money(z.deliveryFee ?? settings.deliveryFee ?? 0)}, minimum ${money(z.minimumOrder ?? settings.minimumOrder ?? 0)}${z.etaMinutes ? `, ~${z.etaMinutes} min` : ''}`;
+    })
+    .join('\n');
+
+export const systemPrompt = ({ settings, catalogue, session, restaurantName, onlinePayment = false, branches = [], branchStatus = () => ({ open: true }), zones = [] }) => {
   const isOpen = settings.isOpen !== 'false';
-  const { missing, orderType } = missingForOrder(session, settings, branches);
+  const { missing, orderType } = missingForOrder(session, settings, branches, zones);
   const chosenBranch = branches.find((b) => b.id === session.pickupLocationId);
+  const zone = zones.length && session.customer?.area ? matchZone(session.customer.area, zones) : null;
+  const deliveryAreas = zones.length
+    ? `\nDELIVERY AREAS (we deliver ONLY to these; each area is served by one branch)\n${zoneLines(zones, settings)}\n- Put the area in "customer.area" using its English name from this list. If the customer's area is not listed, say kindly that we do not deliver there yet and offer pickup from a branch instead. If the area's branch is CLOSED, say when it opens; do not offer another branch for delivery. The fee and minimum of the customer's area apply, not the restaurant-wide ones.\n`
+    : '';
   const payments = allowedPaymentMethods(settings, onlinePayment);
   const c = session.customer || {};
   const known = [
@@ -188,6 +209,7 @@ export const systemPrompt = ({ settings, catalogue, session, restaurantName, onl
     session.paymentMethod && `payment: ${session.paymentMethod}`,
     session.location && 'map pin: shared',
     session.orderType === 'PICKUP' && chosenBranch && `pickup branch: ${chosenBranch.nameEn}`,
+    zone && `delivery area: ${zone.nameEn} (served by ${zone.branch?.nameEn || 'a branch'})`,
   ].filter(Boolean);
   const pickup = settings.pickupEnabled === 'true';
   const pickupBranches =
@@ -228,7 +250,7 @@ COMPLETING THE ORDER
 ${isOpen ? '' : `- The restaurant is CLOSED now (hours: ${settings.workingHours}). Take items into the cart if they like, but explain the order can only be placed during working hours.\n`}
 RESTAURANT
 - Working hours: ${settings.workingHours}. Delivery fee: ${money(settings.deliveryFee || 0)}. Minimum order: ${money(settings.minimumOrder || 0)}.${Number(settings.serviceChargePercent) > 0 ? ` Service charge: ${settings.serviceChargePercent}%.` : ''}
-${pickupBranches}
+${pickupBranches}${deliveryAreas}
 CURRENT CART
 ${describeCart(session.cart, catalogue)}
 
@@ -309,8 +331,8 @@ export const missingOptionsNote = (lang, missingOptions) =>
     .join('\n\n');
 
 const FIELD_LABELS = {
-  en: { items: 'something to order', orderType: 'delivery or pickup', name: 'your name', area: 'your area', block: 'block', street: 'street', building: 'building/house number', pickupBranch: 'which branch you will pick up from', paymentMethod: 'how you want to pay' },
-  ar: { items: 'طلبك', orderType: 'توصيل ولا استلام من الفرع', name: 'اسمك', area: 'المنطقة', block: 'القطعة', street: 'الشارع', building: 'رقم المنزل/البناية', pickupBranch: 'أي فرع تبي تستلم منه', paymentMethod: 'طريقة الدفع' },
+  en: { items: 'something to order', orderType: 'delivery or pickup', name: 'your name', area: 'your area', block: 'block', street: 'street', building: 'building/house number', pickupBranch: 'which branch you will pick up from', deliveryArea: 'an area we deliver to', paymentMethod: 'how you want to pay' },
+  ar: { items: 'طلبك', orderType: 'توصيل ولا استلام من الفرع', name: 'اسمك', area: 'المنطقة', block: 'القطعة', street: 'الشارع', building: 'رقم المنزل/البناية', pickupBranch: 'أي فرع تبي تستلم منه', deliveryArea: 'منطقة نوصل لها', paymentMethod: 'طريقة الدفع' },
 };
 
 export const missingFieldsNote = (lang, missing) => {
